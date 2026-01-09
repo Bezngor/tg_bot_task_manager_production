@@ -138,7 +138,7 @@ jobs:
                 echo ""
                 echo "# Flask API Configuration"
                 echo "FLASK_HOST=0.0.0.0"
-                echo "FLASK_PORT=5000"
+                echo "FLASK_PORT=5050"
                 echo "FLASK_DEBUG=False"
                 echo ""
                 echo "# Logging Configuration"
@@ -185,7 +185,7 @@ jobs:
               --name tg_bot_task_manager_api \
               --restart unless-stopped \
               \$ENV_FILE_OPTION \
-              -p 5000:5000 \
+              -p 5050:5050 \
               -v \$DEPLOY_DIR/data:/app/data \
               -v \$DEPLOY_DIR/logs:/app/logs \
               -v \$DEPLOY_DIR/reports:/app/reports \

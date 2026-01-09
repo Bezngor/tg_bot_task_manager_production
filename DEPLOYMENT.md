@@ -167,7 +167,7 @@ ENCRYPTION_KEY=ваш_32_символьный_ключ_шифрования
 
 # Flask API Configuration
 FLASK_HOST=0.0.0.0
-FLASK_PORT=5000
+FLASK_PORT=5050
 FLASK_DEBUG=False
 
 # Logging Configuration
@@ -269,7 +269,7 @@ docker logs tg_bot_task_manager_api
 
 ```bash
 # Проверка health endpoint
-curl http://localhost:5000/health
+curl http://localhost:5050/health
 
 # Должен вернуться: {"status":"ok","timestamp":"..."}
 ```
@@ -434,15 +434,15 @@ tar -czf /opt/task_manager/backup/full_backup_$(date +%Y%m%d_%H%M%S).tar.gz /opt
 
 ### Настройка firewall
 
-Если нужно открыть порт 5000 для API:
+Если нужно открыть порт 5050 для API:
 
 ```bash
 # UFW (Ubuntu)
-sudo ufw allow 5000/tcp
+sudo ufw allow 5050/tcp
 sudo ufw reload
 
 # или iptables
-sudo iptables -A INPUT -p tcp --dport 5000 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 5050 -j ACCEPT
 ```
 
 ### Мониторинг ресурсов
