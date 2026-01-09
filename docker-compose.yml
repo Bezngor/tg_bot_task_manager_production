@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: tg_bot_task_manager
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Монтируем директории для сохранения данных
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./task_manager.db:/app/task_manager.db
+    command: python bot.py
+    depends_on:
+      - api
+
+  api:
+    build: .
+    container_name: tg_bot_task_manager_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    volumes:
+      # Монтируем директории для сохранения данных
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./task_manager.db:/app/task_manager.db
+    command: python api.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
