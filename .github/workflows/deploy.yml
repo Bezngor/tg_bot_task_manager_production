@@ -126,25 +126,25 @@ jobs:
             if [ ! -f "\$ENV_FILE" ]; then
               echo "⚠️  WARNING: .env file not found at \$ENV_FILE"
               echo "Creating a basic .env file. Please update it with your actual values!"
-              cat > \$ENV_FILE << ENV_EOF
-# Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-
-# Database Configuration
-DATABASE_URL=sqlite:///task_manager.db
-
-# Encryption Key
-ENCRYPTION_KEY=your_32_character_encryption_key_here
-
-# Flask API Configuration
-FLASK_HOST=0.0.0.0
-FLASK_PORT=5000
-FLASK_DEBUG=False
-
-# Logging Configuration
-LOG_LEVEL=INFO
-LOG_FILE=bot.log
-ENV_EOF
+              {
+                echo "# Telegram Bot Configuration"
+                echo "TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here"
+                echo ""
+                echo "# Database Configuration"
+                echo "DATABASE_URL=sqlite:///task_manager.db"
+                echo ""
+                echo "# Encryption Key"
+                echo "ENCRYPTION_KEY=your_32_character_encryption_key_here"
+                echo ""
+                echo "# Flask API Configuration"
+                echo "FLASK_HOST=0.0.0.0"
+                echo "FLASK_PORT=5000"
+                echo "FLASK_DEBUG=False"
+                echo ""
+                echo "# Logging Configuration"
+                echo "LOG_LEVEL=INFO"
+                echo "LOG_FILE=bot.log"
+              } > \$ENV_FILE
               echo "⚠️  Please update \$ENV_FILE with your actual configuration values!"
             fi
             
