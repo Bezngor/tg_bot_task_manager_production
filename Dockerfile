@@ -26,7 +26,7 @@ ENV PYTHONUNBUFFERED=1
 ENV DATABASE_URL=sqlite:///task_manager.db
 
 # Открываем порт для API (если нужно)
-EXPOSE 5000
+EXPOSE 5050
 
 # Команда по умолчанию - запуск бота
 # Для запуска API используйте: python api.py

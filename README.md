@@ -62,7 +62,7 @@ ENCRYPTION_KEY=your_32_character_encryption_key_here
 
 # Flask API Configuration
 FLASK_HOST=0.0.0.0
-FLASK_PORT=5000
+FLASK_PORT=5050
 FLASK_DEBUG=False
 
 # Logging Configuration
@@ -105,8 +105,8 @@ python bot.py
 python api.py
 ```
 
-API будет доступен по адресу: `http://localhost:5000`
-Swagger документация: `http://localhost:5000/swagger/`
+API будет доступен по адресу: `http://localhost:5050`
+Swagger документация: `http://localhost:5050/swagger/`
 
 ## Инициализация данных
 
@@ -188,7 +188,7 @@ TG_bot_midex_task_manager_production/
 #### Health Check
 - `GET /health` - проверка состояния API
 
-Полная документация API доступна по адресу: `http://localhost:5000/swagger/`
+Полная документация API доступна по адресу: `http://localhost:5050/swagger/`
 
 ## Роли пользователей
 
@@ -309,7 +309,7 @@ server {
     server_name your-domain.com;
 
     location / {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:5050;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }

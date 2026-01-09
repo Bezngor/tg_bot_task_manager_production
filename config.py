@@ -20,7 +20,7 @@ ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', '')
 
 # Flask API
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
-FLASK_PORT = int(os.getenv('FLASK_PORT', 5000))
+FLASK_PORT = int(os.getenv('FLASK_PORT', 5050))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
 # Logging
