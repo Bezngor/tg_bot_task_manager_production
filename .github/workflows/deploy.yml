@@ -1,0 +1,172 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Convert repository name to lowercase
+        id: repo-name
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPO_LOWER=$REPO_LOWER" >> $GITHUB_OUTPUT
+          echo "Repository name in lowercase: $REPO_LOWER"
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image name
+        run: |
+          echo "Image built and pushed: ${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}:${{ github.ref_name }}"
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Convert repository name to lowercase
+        id: repo-name
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPO_LOWER=$REPO_LOWER" >> $GITHUB_OUTPUT
+          echo "Repository name in lowercase: $REPO_LOWER"
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ steps.repo-name.outputs.REPO_LOWER }}
+          IMAGE_TAG: ${{ github.ref_name }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE_FULL="${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}:${{ github.ref_name }}"
+          IMAGE_LATEST="${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}:latest"
+          
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << EOF
+            set -e
+            
+            REGISTRY="${{ env.REGISTRY }}"
+            IMAGE_NAME="${{ steps.repo-name.outputs.REPO_LOWER }}"
+            IMAGE_FULL="$IMAGE_FULL"
+            IMAGE_LATEST="$IMAGE_LATEST"
+            GITHUB_ACTOR="${{ github.actor }}"
+            GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            
+            # Логин в GHCR
+            echo "\$GITHUB_TOKEN" | docker login \$REGISTRY -u \$GITHUB_ACTOR --password-stdin
+            
+            # Останавливаем и удаляем старые контейнеры
+            docker stop tg_bot_task_manager tg_bot_task_manager_api 2>/dev/null || true
+            docker rm tg_bot_task_manager tg_bot_task_manager_api 2>/dev/null || true
+            
+            # Скачиваем новый образ (сначала пробуем по тегу, затем latest)
+            docker pull \$IMAGE_FULL || docker pull \$IMAGE_LATEST || true
+            ACTUAL_IMAGE=\$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^\$REGISTRY/\$IMAGE_NAME" | head -n1)
+            if [ -z "\$ACTUAL_IMAGE" ]; then
+              ACTUAL_IMAGE=\$IMAGE_LATEST
+            fi
+            echo "Using image: \$ACTUAL_IMAGE"
+            
+            # Запускаем бота
+            docker run -d \
+              --name tg_bot_task_manager \
+              --restart unless-stopped \
+              --env-file /opt/task_manager/.env \
+              -v /opt/task_manager/data:/app/data \
+              -v /opt/task_manager/logs:/app/logs \
+              -v /opt/task_manager/reports:/app/reports \
+              -v /opt/task_manager/task_manager.db:/app/task_manager.db \
+              \$ACTUAL_IMAGE python bot.py
+            
+            # Запускаем API
+            docker run -d \
+              --name tg_bot_task_manager_api \
+              --restart unless-stopped \
+              --env-file /opt/task_manager/.env \
+              -p 5000:5000 \
+              -v /opt/task_manager/data:/app/data \
+              -v /opt/task_manager/logs:/app/logs \
+              -v /opt/task_manager/reports:/app/reports \
+              -v /opt/task_manager/task_manager.db:/app/task_manager.db \
+              \$ACTUAL_IMAGE python api.py
+            
+            # Проверяем статус контейнеров
+            docker ps | grep -E "tg_bot_task_manager|tg_bot_task_manager_api" || true
+            
+            # Очистка старых образов (опционально)
+            docker image prune -f
+            
+            echo "Deployment completed successfully!"
+          EOF
+
+      - name: Deployment status
+        run: |
+          echo "✅ Deployment completed!"
+          echo "Bot container: tg_bot_task_manager"
+          echo "API container: tg_bot_task_manager_api"
+          echo "Image: ${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}:${{ github.ref_name }}"
