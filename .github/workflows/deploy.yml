@@ -116,6 +116,37 @@ jobs:
             IMAGE_LATEST="$IMAGE_LATEST"
             GITHUB_ACTOR="${{ github.actor }}"
             GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            DEPLOY_DIR="/opt/task_manager"
+            ENV_FILE="\$DEPLOY_DIR/.env"
+            
+            # Создаем директорию, если её нет
+            mkdir -p \$DEPLOY_DIR/data \$DEPLOY_DIR/logs \$DEPLOY_DIR/reports
+            
+            # Проверяем наличие .env файла, если нет - предупреждаем
+            if [ ! -f "\$ENV_FILE" ]; then
+              echo "⚠️  WARNING: .env file not found at \$ENV_FILE"
+              echo "Creating a basic .env file. Please update it with your actual values!"
+              cat > \$ENV_FILE << ENV_EOF
+# Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# Database Configuration
+DATABASE_URL=sqlite:///task_manager.db
+
+# Encryption Key
+ENCRYPTION_KEY=your_32_character_encryption_key_here
+
+# Flask API Configuration
+FLASK_HOST=0.0.0.0
+FLASK_PORT=5000
+FLASK_DEBUG=False
+
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FILE=bot.log
+ENV_EOF
+              echo "⚠️  Please update \$ENV_FILE with your actual configuration values!"
+            fi
             
             # Логин в GHCR
             echo "\$GITHUB_TOKEN" | docker login \$REGISTRY -u \$GITHUB_ACTOR --password-stdin
@@ -132,27 +163,33 @@ jobs:
             fi
             echo "Using image: \$ACTUAL_IMAGE"
             
+            # Подготавливаем опцию для env-file (только если файл существует)
+            ENV_FILE_OPTION=""
+            if [ -f "\$ENV_FILE" ]; then
+              ENV_FILE_OPTION="--env-file \$ENV_FILE"
+            fi
+            
             # Запускаем бота
             docker run -d \
               --name tg_bot_task_manager \
               --restart unless-stopped \
-              --env-file /opt/task_manager/.env \
-              -v /opt/task_manager/data:/app/data \
-              -v /opt/task_manager/logs:/app/logs \
-              -v /opt/task_manager/reports:/app/reports \
-              -v /opt/task_manager/task_manager.db:/app/task_manager.db \
+              \$ENV_FILE_OPTION \
+              -v \$DEPLOY_DIR/data:/app/data \
+              -v \$DEPLOY_DIR/logs:/app/logs \
+              -v \$DEPLOY_DIR/reports:/app/reports \
+              -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
               \$ACTUAL_IMAGE python bot.py
             
             # Запускаем API
             docker run -d \
               --name tg_bot_task_manager_api \
               --restart unless-stopped \
-              --env-file /opt/task_manager/.env \
+              \$ENV_FILE_OPTION \
               -p 5000:5000 \
-              -v /opt/task_manager/data:/app/data \
-              -v /opt/task_manager/logs:/app/logs \
-              -v /opt/task_manager/reports:/app/reports \
-              -v /opt/task_manager/task_manager.db:/app/task_manager.db \
+              -v \$DEPLOY_DIR/data:/app/data \
+              -v \$DEPLOY_DIR/logs:/app/logs \
+              -v \$DEPLOY_DIR/reports:/app/reports \
+              -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
               \$ACTUAL_IMAGE python api.py
             
             # Проверяем статус контейнеров
