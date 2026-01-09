@@ -1,0 +1,9 @@
+python-telegram-bot
+flask
+flask-restx
+sqlalchemy
+cryptography
+python-dotenv
+reportlab
+pandas
+werkzeug
