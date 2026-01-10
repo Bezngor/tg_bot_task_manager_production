@@ -30,6 +30,7 @@ from app.core.utils import logger, generate_csv_report, generate_pdf_report
 SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
 SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(6, 8)
 SELECTING_STATUS = 8  # Состояние для выбора статуса заданий
+SELECTING_REPORT_FORMAT = 9  # Состояние для выбора формата отчета
 
 # Глобальные переменные для хранения данных при создании задания
 task_data = {}
@@ -725,8 +726,8 @@ async def enter_actual_quantity(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 @role_required(['admin', 'manager'])
-async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерация отчета для начальника"""
+async def generate_report_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало генерации отчета для начальника - выбор формата"""
     user = update.effective_user
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user.id)
@@ -734,19 +735,97 @@ async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not tasks:
             await update.message.reply_text("📊 У вас нет заданий для отчета.")
-            return
+            return ConversationHandler.END
         
-        # Генерируем CSV
-        csv_path = generate_csv_report(tasks, f'reports/report_manager_{manager.id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+        # Показываем клавиатуру для выбора формата
+        keyboard = [
+            [InlineKeyboardButton("📄 CSV формат", callback_data="report_format_csv")],
+            [InlineKeyboardButton("📑 PDF формат", callback_data="report_format_pdf")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="report_format_cancel")]
+        ]
         
-        # Генерируем PDF
-        pdf_path = generate_pdf_report(tasks, f'reports/report_manager_{manager.id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pdf')
-        
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"📊 Отчет сгенерирован!\n\n"
-            f"CSV: {csv_path}\n"
-            f"PDF: {pdf_path}"
+            "📊 Выберите формат отчета:",
+            reply_markup=reply_markup
         )
+        return SELECTING_REPORT_FORMAT
+
+
+@role_required(['admin', 'manager'])
+async def generate_and_send_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация и отправка отчета выбранного формата"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "report_format_cancel":
+        await query.edit_message_text("❌ Генерация отчета отменена.")
+        return ConversationHandler.END
+    
+    user = update.effective_user
+    format_type = query.data.replace("report_format_", "")  # "csv" или "pdf"
+    
+    # Показываем сообщение о начале генерации
+    await query.edit_message_text("⏳ Генерирую отчет... Пожалуйста, подождите.")
+    
+    try:
+        with DatabaseManager() as db:
+            manager = db.get_user_by_telegram_id(user.id)
+            if not manager:
+                await query.edit_message_text("❌ Пользователь не найден.")
+                return ConversationHandler.END
+            
+            tasks = db.get_tasks_by_manager(manager.id)
+            
+            if not tasks:
+                await query.edit_message_text("📊 У вас нет заданий для отчета.")
+                return ConversationHandler.END
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Генерируем отчет выбранного формата
+            if format_type == "pdf":
+                file_path = generate_pdf_report(
+                    tasks, 
+                    f'reports/report_manager_{manager.id}_{timestamp}.pdf'
+                )
+                file_caption = f"📑 Отчет по заданиям (PDF)\n\nВсего заданий: {len(tasks)}\nСгенерировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            else:  # csv
+                file_path = generate_csv_report(
+                    tasks,
+                    f'reports/report_manager_{manager.id}_{timestamp}.csv'
+                )
+                file_caption = f"📄 Отчет по заданиям (CSV)\n\nВсего заданий: {len(tasks)}\nСгенерировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            
+            # Отправляем файл пользователю
+            try:
+                with open(file_path, 'rb') as report_file:
+                    await context.bot.send_document(
+                        chat_id=user.id,
+                        document=report_file,
+                        caption=file_caption,
+                        filename=os.path.basename(file_path)
+                    )
+                
+                await query.edit_message_text(
+                    f"✅ Отчет успешно сгенерирован и отправлен!\n\n"
+                    f"Формат: {format_type.upper()}\n"
+                    f"Заданий в отчете: {len(tasks)}\n\n"
+                    f"💾 Файл доступен в ваших загрузках Telegram."
+                )
+                logger.info(f"Отчет {file_path} отправлен пользователю {user.id}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки файла отчета: {e}")
+                await query.edit_message_text(
+                    f"❌ Ошибка при отправке файла: {str(e)}\n\n"
+                    f"Файл сгенерирован по пути: {file_path}"
+                )
+        
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Ошибка генерации отчета: {e}", exc_info=e)
+        await query.edit_message_text(f"❌ Ошибка при генерации отчета: {str(e)}")
+        return ConversationHandler.END
 
 
 async def show_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -890,8 +969,15 @@ def main():
     )
     application.add_handler(report_handler)
     
-    # Обработчик генерации отчета
-    application.add_handler(MessageHandler(filters.Regex("^📈 Отчет$"), generate_report))
+    # Обработчик генерации отчета с выбором формата
+    report_generation_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📈 Отчет$"), generate_report_start)],
+        states={
+            SELECTING_REPORT_FORMAT: [CallbackQueryHandler(generate_and_send_report, pattern="^report_format_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
+    )
+    application.add_handler(report_generation_handler)
     
     # Обработчик уведомлений
     application.add_handler(MessageHandler(filters.Regex("^🔔 Уведомления$"), show_notifications))
