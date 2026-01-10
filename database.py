@@ -74,11 +74,17 @@ class DatabaseManager:
     
     def get_all_employees(self):
         """Получить всех сотрудников"""
-        return self.db.query(User).filter(User.role == RoleEnum.EMPLOYEE, User.is_active == True).all()
+        return self.db.query(User).filter(
+            User.role == RoleEnum.EMPLOYEE,
+            User.is_active == True
+        ).all()
     
     def get_all_managers(self):
         """Получить всех начальников"""
-        return self.db.query(User).filter(User.role == RoleEnum.MANAGER, User.is_active == True).all()
+        return self.db.query(User).filter(
+            User.role == RoleEnum.MANAGER,
+            User.is_active == True
+        ).all()
     
     # === Workshop operations ===
     def get_all_workshops(self):
