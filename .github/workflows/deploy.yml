@@ -151,9 +151,43 @@ jobs:
             # Логин в GHCR
             echo "\$GITHUB_TOKEN" | docker login \$REGISTRY -u \$GITHUB_ACTOR --password-stdin
             
-            # Останавливаем и удаляем старые контейнеры
-            docker stop tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
-            docker rm tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
+            # Останавливаем и удаляем старые контейнеры (более надежный способ)
+            echo "Stopping existing containers..."
+            for container in tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin; do
+              if docker ps -a --format '{{.Names}}' | grep -q "^${container}\$"; then
+                echo "Stopping and removing container: ${container}"
+                docker stop ${container} 2>/dev/null || true
+                docker rm -f ${container} 2>/dev/null || true
+              fi
+            done
+            
+            # Ждем освобождения портов
+            echo "Waiting for ports to be released..."
+            sleep 3
+            
+            # Проверяем и принудительно освобождаем порты, если они заняты
+            echo "Checking port 5051..."
+            PORT_5051_IN_USE=false
+            if command -v lsof >/dev/null 2>&1 && lsof -ti:5051 >/dev/null 2>&1; then
+              PORT_5051_IN_USE=true
+            elif command -v ss >/dev/null 2>&1 && ss -tuln 2>/dev/null | grep -q ":5051 "; then
+              PORT_5051_IN_USE=true
+            elif command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":5051 "; then
+              PORT_5051_IN_USE=true
+            fi
+            
+            if [ "\$PORT_5051_IN_USE" = "true" ]; then
+              echo "Port 5051 is still in use. Attempting to free it..."
+              if command -v lsof >/dev/null 2>&1; then
+                PID=\$(lsof -ti:5051 2>/dev/null | head -1)
+                if [ -n "\$PID" ]; then
+                  kill -9 \$PID 2>/dev/null || true
+                fi
+              fi
+              sleep 2
+            fi
+            
+            echo "Port check completed. Proceeding with deployment..."
             
             # Скачиваем новый образ (сначала пробуем по тегу, затем latest)
             docker pull \$IMAGE_FULL || docker pull \$IMAGE_LATEST || true
@@ -193,7 +227,8 @@ jobs:
               \$ACTUAL_IMAGE python api.py
             
             # Запускаем админ-панель
-            docker run -d \
+            echo "Starting admin panel container..."
+            if ! docker run -d \
               --name tg_bot_task_manager_admin \
               --restart unless-stopped \
               \$ENV_FILE_OPTION \
@@ -202,10 +237,60 @@ jobs:
               -v \$DEPLOY_DIR/logs:/app/logs \
               -v \$DEPLOY_DIR/reports:/app/reports \
               -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
-              \$ACTUAL_IMAGE python -m app.admin.admin_panel
+              \$ACTUAL_IMAGE python -m app.admin.admin_panel; then
+              echo "❌ Failed to start admin panel container. Checking port 5051..."
+              docker ps -a | grep tg_bot_task_manager_admin || true
+              # Проверяем, что использует порт 5051
+              if command -v lsof >/dev/null 2>&1; then
+                lsof -i:5051 2>/dev/null || true
+              elif command -v ss >/dev/null 2>&1; then
+                ss -tuln 2>/dev/null | grep ":5051 " || true
+              elif command -v netstat >/dev/null 2>&1; then
+                netstat -tuln 2>/dev/null | grep ":5051 " || true
+              fi
+              echo "Attempting to fix and retry..."
+              # Попытка принудительно освободить порт
+              if command -v lsof >/dev/null 2>&1; then
+                PID=\$(lsof -ti:5051 2>/dev/null | head -1)
+                if [ -n "\$PID" ]; then
+                  kill -9 \$PID 2>/dev/null || true
+                fi
+              fi
+              sleep 2
+              docker rm -f tg_bot_task_manager_admin 2>/dev/null || true
+              # Повторная попытка запуска
+              docker run -d \
+                --name tg_bot_task_manager_admin \
+                --restart unless-stopped \
+                \$ENV_FILE_OPTION \
+                -p 5051:5051 \
+                -v \$DEPLOY_DIR/data:/app/data \
+                -v \$DEPLOY_DIR/logs:/app/logs \
+                -v \$DEPLOY_DIR/reports:/app/reports \
+                -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
+                \$ACTUAL_IMAGE python -m app.admin.admin_panel || {
+                  echo "❌ Failed to start admin panel container after retry"
+                  exit 1
+                }
+            fi
             
-            # Проверяем статус контейнеров
+            # Ждем немного и проверяем статус контейнеров
+            sleep 2
+            echo "Container status:"
             docker ps | grep -E "tg_bot_task_manager|tg_bot_task_manager_api|tg_bot_task_manager_admin" || true
+            
+            # Проверяем, что все контейнеры запущены
+            if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager\$"; then
+              echo "⚠️  Warning: Bot container may not be running"
+            fi
+            if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager_api\$"; then
+              echo "⚠️  Warning: API container may not be running"
+            fi
+            if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager_admin\$"; then
+              echo "❌ Error: Admin panel container is not running"
+              docker logs tg_bot_task_manager_admin 2>/dev/null | tail -20 || true
+              exit 1
+            fi
             
             # Очистка старых образов (опционально)
             docker image prune -f
