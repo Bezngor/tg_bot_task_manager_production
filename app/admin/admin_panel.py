@@ -574,11 +574,11 @@ def delete_workshop(workshop_id):
     return redirect(url_for('workshops_list'))
 
 # Формы
-def render_form(title, fields, action_url, back_url, section, values=None):
+def render_form(title, fields, action_url, back_url, section, values=None, message=None, message_type='error'):
     form_html = f"""
     <div class="card">
         <h2>{title}</h2>
-        <form method="POST" action="{action_url}">
+        <form method="POST" action="{action_url}" novalidate>
     """
     for field in fields:
         value = values.get(field['name'], '') if values else ''
@@ -726,9 +726,14 @@ def render_form(title, fields, action_url, back_url, section, values=None):
                         nameInput.setAttribute('required', 'required');
                         nameInput.style.border = '2px solid #ced4da';
                         nameInput.style.display = 'block';
+                        // Убираем disabled если был установлен
+                        nameInput.removeAttribute('disabled');
                     } else {
                         nameInput.removeAttribute('required');
                         nameInput.style.display = 'none';
+                        // Отключаем поле при скрытии, чтобы браузер не валидировал его
+                        nameInput.setAttribute('disabled', 'disabled');
+                        nameInput.value = ''; // Очищаем значение при скрытии
                     }
                 }
             }
@@ -763,6 +768,76 @@ def render_form(title, fields, action_url, back_url, section, values=None):
                 // Также вызываем при клике для немедленной реакции
                 radio.addEventListener('click', updateFieldsVisibility);
             });
+            
+            // Обработчик отправки формы - убеждаемся, что скрытые поля не блокируют отправку
+            const form = document.querySelector('form[action="/products/add"]');
+            if (form) {
+                form.addEventListener('submit', function(e) {
+                    console.log('Form submit event triggered');
+                    
+                    // Находим все скрытые элементы и элементы внутри скрытых групп
+                    const category = document.querySelector('input[name="category"]:checked')?.value || '';
+                    console.log('Category:', category);
+                    
+                    // Убираем required у всех скрытых полей
+                    const allInputs = form.querySelectorAll('input, select, textarea');
+                    let removedRequiredCount = 0;
+                    
+                    allInputs.forEach(input => {
+                        // Проверяем, скрыт ли элемент через стили
+                        const inputStyle = window.getComputedStyle(input);
+                        const isInputHidden = inputStyle.display === 'none' || inputStyle.visibility === 'hidden';
+                        
+                        // Проверяем родительские контейнеры
+                        const inputGroup = input.closest('div[id$="_group"]');
+                        const nameField = input.closest('div[id="name_conditional_field"]');
+                        let isParentHidden = false;
+                        
+                        if (inputGroup) {
+                            const groupStyle = window.getComputedStyle(inputGroup);
+                            isParentHidden = groupStyle.display === 'none';
+                        }
+                        
+                        if (nameField && category !== 'ГП' && category !== 'ТУБА') {
+                            const nameFieldStyle = window.getComputedStyle(nameField);
+                            if (nameFieldStyle.display === 'none') {
+                                isParentHidden = true;
+                            }
+                        }
+                        
+                        // Убираем required у скрытых полей
+                        if (isInputHidden || isParentHidden || input.hasAttribute('disabled')) {
+                            if (input.hasAttribute('required')) {
+                                input.removeAttribute('required');
+                                removedRequiredCount++;
+                                console.log('Removed required from:', input.name, input.type);
+                            }
+                        }
+                        
+                        // Специальная обработка для условных групп
+                        if (inputGroup) {
+                            const groupId = inputGroup.id;
+                            let shouldBeVisible = false;
+                            if (groupId === 'mass_fields_group' && category === 'МАССА') shouldBeVisible = true;
+                            else if (groupId === 'gp_fields_group' && category === 'ГП') shouldBeVisible = true;
+                            else if (groupId === 'tube_fields_group' && category === 'ТУБА') shouldBeVisible = true;
+                            
+                            if (!shouldBeVisible && input.hasAttribute('required')) {
+                                input.removeAttribute('required');
+                                removedRequiredCount++;
+                                console.log('Removed required from conditional field:', input.name);
+                            }
+                        }
+                    });
+                    
+                    console.log('Removed required from', removedRequiredCount, 'hidden fields');
+                    console.log('Form validation passed, submitting...');
+                    // Разрешаем отправку формы (form уже имеет novalidate, но на всякий случай)
+                    return true;
+                }, false);
+            } else {
+                console.error('Form not found!');
+            }
         });
         </script>
         '''
@@ -773,7 +848,7 @@ def render_form(title, fields, action_url, back_url, section, values=None):
         </form>
     </div>
     """
-    return render_page(form_html, section=section)
+    return render_page(form_html, section=section, message=message, message_type=message_type)
 
 @app.route('/equipment/add', methods=['GET', 'POST'])
 def add_equipment():
@@ -867,10 +942,14 @@ def get_product_metadata(product):
 @app.route('/products/add', methods=['GET', 'POST'])
 def add_product():
     if request.method == 'POST':
+        import json
+        import sys
+        # Логируем полученные данные формы для отладки
+        print(f"POST request received. Form data: {dict(request.form)}", file=sys.stderr)
         with DatabaseManager() as db:
-            import json
             # Получаем категорию
             category = request.form.get('category')
+            print(f"Category: {category}", file=sys.stderr)
             
             # Для категории МАССА название не требуется - будет сгенерировано из наименования массы
             if category == 'МАССА':
@@ -968,10 +1047,10 @@ def add_product():
                         'seal_id': request.form.get('seal_id', ''),
                         'tube_name': request.form.get('tube_name', '')
                     }
-                    form_content = render_form('Добавить продукцию', fields, '/products/add', '/products', 'products', values)
-                    return render_page(form_content, section='products', 
-                                 message='Ошибка: Название продукции обязательно для заполнения! Это поле критически важно для категорий ГП и ТУБА.', 
-                                 message_type='error')
+                    # Используем ту же логику для получения данных формы, но передаем сообщение об ошибке
+                    return render_form('Добавить продукцию', fields, '/products/add', '/products', 'products', values, 
+                                     message='Ошибка: Название продукции обязательно для заполнения! Это поле критически важно для категорий ГП и ТУБА.', 
+                                     message_type='error')
             
             # Собираем данные в зависимости от категории
             metadata = {'category': category}
@@ -1131,10 +1210,9 @@ def add_product():
                     'seal_id': request.form.get('seal_id', ''),
                     'tube_name': request.form.get('tube_name', '')
                 }
-                form_content = render_form('Добавить продукцию', fields, '/products/add', '/products', 'products', values)
-                return render_page(form_content, section='products', 
-                             message=f'Ошибка при сохранении: {error_msg}', 
-                             message_type='error')
+                return render_form('Добавить продукцию', fields, '/products/add', '/products', 'products', values,
+                                 message=f'Ошибка при сохранении: {error_msg}', 
+                                 message_type='error')
     
     with DatabaseManager() as db:
         equipment_list = db.db.query(Equipment).filter(Equipment.is_active == True).all()
