@@ -53,6 +53,8 @@ services:
       - ./logs:/app/logs
       - ./reports:/app/reports
       - ./task_manager.db:/app/task_manager.db
+      # Монтируем код для разработки (чтобы изменения применялись без пересборки)
+      - ./app:/app/app
     command: python -m app.admin.admin_panel
     depends_on:
       - api

@@ -125,9 +125,9 @@ BASE_TEMPLATE = """
         .container .card {
             max-width: 100%;
         }
-        /* Для страниц с формами - более узкий контейнер */
+        /* Для страниц с формами - такой же ширины как контейнер */
         .form-container {
-            max-width: 800px;
+            max-width: 100%;
             margin: 0 auto;
             padding: 20px;
         }
@@ -241,6 +241,9 @@ BASE_TEMPLATE = """
             max-width: 100%;
             overflow: hidden;
         }
+        input[type="text"], input[type="number"], select, textarea {
+            min-height: 42px;
+        }
         #name_conditional_field {
             display: block !important;
             margin-bottom: 20px;
@@ -259,19 +262,6 @@ BASE_TEMPLATE = """
         }
         #name_conditional_field input[type="text"]:hover {
             border-color: #2980b9 !important;
-        }
-        input[type="text"], input[type="number"], select, textarea {
-            min-height: 42px;
-        }
-        #name_conditional_field input[type="text"] {
-            border: 2px solid #3498db !important;
-            background-color: #ffffff !important;
-            font-size: 15px !important;
-            padding: 12px 15px !important;
-        }
-        #name_conditional_field input[type="text"]:focus {
-            border-color: #2980b9 !important;
-            box-shadow: 0 0 0 4px rgba(52, 152, 219, 0.2) !important;
         }
         .alert {
             padding: 15px;
@@ -586,16 +576,18 @@ def delete_workshop(workshop_id):
 # Формы
 def render_form(title, fields, action_url, back_url, section, values=None):
     form_html = f"""
-    <div class="card" style="max-width: 800px; margin: 0 auto;">
+    <div class="card">
         <h2>{title}</h2>
         <form method="POST" action="{action_url}">
     """
     for field in fields:
         value = values.get(field['name'], '') if values else ''
         
-        # Проверяем, является ли поле условным
+        # Проверяем, является ли поле условным (только для условных полей создаем обертку)
         field_id = None
-        if field.get('conditional') and field.get('categories'):
+        should_wrap = field.get('conditional') and field.get('categories') and field['type'] == 'text'
+        
+        if should_wrap:
             # Для условных полей создаем обертку с условным отображением
             initial_category = values.get('category', '') if values else ''
             categories = field.get('categories', [])
@@ -712,78 +704,68 @@ def render_form(title, fields, action_url, back_url, section, values=None):
         
         form_html += '</div>'  # Закрываем form-group
         
-        # Закрываем условную обертку, если она была создана
-        if field_id and field['type'] != 'conditional_field':
+        # Закрываем условную обертку, если она была создана (только для условных text полей)
+        if field_id:
             form_html += '</div>'
-        
-        # Добавляем JavaScript для управления видимостью полей один раз для всех групп
-        if any(f.get('type') in ['conditional_group', 'conditional_field'] for f in fields):
-            form_html += '''
-            <script>
-            function updateFieldsVisibility() {
-                const category = document.querySelector('input[name="category"]:checked')?.value || '';
-                // Поле "Название продукции" показываем только для ГП и ТУБА
-                const nameField = document.getElementById('name_conditional_field');
-                if (nameField) {
-                    const shouldShow = (category === 'ГП' || category === 'ТУБА');
-                    nameField.style.display = shouldShow ? 'block' : 'none';
-                    // Управляем required атрибутом
-                    const nameInput = nameField.querySelector('input[name="name"]');
-                    if (nameInput) {
-                        if (shouldShow) {
-                            nameInput.setAttribute('required', 'required');
-                            nameInput.style.border = '2px solid #ced4da';
-                            nameInput.style.display = 'block';
-                        } else {
-                            nameInput.removeAttribute('required');
-                            nameInput.style.display = 'none';
-                        }
+    
+    # Добавляем JavaScript для управления видимостью полей один раз для всех групп (после всех полей)
+    if any(f.get('type') in ['conditional_group', 'conditional_field'] for f in fields):
+        form_html += '''
+        <script>
+        function updateFieldsVisibility() {
+            const category = document.querySelector('input[name="category"]:checked')?.value || '';
+            // Поле "Название продукции" показываем только для ГП и ТУБА
+            const nameField = document.getElementById('name_conditional_field');
+            if (nameField) {
+                const shouldShow = (category === 'ГП' || category === 'ТУБА');
+                nameField.style.display = shouldShow ? 'block' : 'none';
+                // Управляем required атрибутом
+                const nameInput = nameField.querySelector('input[name="name"]');
+                if (nameInput) {
+                    if (shouldShow) {
+                        nameInput.setAttribute('required', 'required');
+                        nameInput.style.border = '2px solid #ced4da';
+                        nameInput.style.display = 'block';
+                    } else {
+                        nameInput.removeAttribute('required');
+                        nameInput.style.display = 'none';
                     }
                 }
-                // Условные группы полей
-                const massFields = document.getElementById('mass_fields_group');
-                if (massFields) massFields.style.display = category === 'МАССА' ? 'block' : 'none';
-                const gpFields = document.getElementById('gp_fields_group');
-                if (gpFields) gpFields.style.display = category === 'ГП' ? 'block' : 'none';
-                const tubeFields = document.getElementById('tube_fields_group');
-                if (tubeFields) tubeFields.style.display = category === 'ТУБА' ? 'block' : 'none';
             }
+            // Условные группы полей
+            const massFields = document.getElementById('mass_fields_group');
+            if (massFields) massFields.style.display = category === 'МАССА' ? 'block' : 'none';
+            const gpFields = document.getElementById('gp_fields_group');
+            if (gpFields) gpFields.style.display = category === 'ГП' ? 'block' : 'none';
+            const tubeFields = document.getElementById('tube_fields_group');
+            if (tubeFields) tubeFields.style.display = category === 'ТУБА' ? 'block' : 'none';
+        }
+        
+        // Функция для удаления дубликатов в multiselect
+        function removeDuplicates(selectElement) {
+            const selectedValues = Array.from(selectElement.selectedOptions).map(opt => opt.value);
+            const uniqueValues = [...new Set(selectedValues)];
             
-            // Функция для удаления дубликатов в multiselect
-            function removeDuplicates(selectElement) {
-                const selectedValues = Array.from(selectElement.selectedOptions).map(opt => opt.value);
-                const uniqueValues = [...new Set(selectedValues)];
-                
-                // Если есть дубликаты, обновляем выбор
-                if (selectedValues.length !== uniqueValues.length) {
-                    Array.from(selectElement.options).forEach(opt => {
-                        opt.selected = uniqueValues.includes(opt.value);
-                    });
-                }
-            }
-            
-            document.addEventListener('DOMContentLoaded', function() {
-                // Сразу вызываем для установки правильного начального состояния
-                updateFieldsVisibility();
-                // Устанавливаем обработчики на изменение категории
-                document.querySelectorAll('input[name="category"]').forEach(radio => {
-                    radio.addEventListener('change', updateFieldsVisibility);
-                    // Также вызываем при клике для немедленной реакции
-                    radio.addEventListener('click', updateFieldsVisibility);
+            // Если есть дубликаты, обновляем выбор
+            if (selectedValues.length !== uniqueValues.length) {
+                Array.from(selectElement.options).forEach(opt => {
+                    opt.selected = uniqueValues.includes(opt.value);
                 });
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            // Сразу вызываем для установки правильного начального состояния
+            updateFieldsVisibility();
+            // Устанавливаем обработчики на изменение категории
+            document.querySelectorAll('input[name="category"]').forEach(radio => {
+                radio.addEventListener('change', updateFieldsVisibility);
+                // Также вызываем при клике для немедленной реакции
+                radio.addEventListener('click', updateFieldsVisibility);
             });
-            </script>
-            '''
-        else:
-            # Для других типов полей
-            required_attr = 'required' if field.get('required') else ''
-            form_html += f'<input type="{field["type"]}" name="{field["name"]}" value="{value}" {required_attr}>'
-        
-        form_html += '</div>'
-        
-        # Закрываем условную обертку, если она была создана
-        if field_id and field['type'] != 'conditional_field':
-            form_html += '</div>'
+        });
+        </script>
+        '''
     
     form_html += f"""
             <button type="submit" class="btn btn-success">Сохранить</button>
