@@ -241,33 +241,41 @@ class UserList(Resource):
     @api.marshal_list_with(user_model)
     def get(self):
         """Получить список пользователей"""
-        role = request.args.get('role')
-        
-        with DatabaseManager() as db:
-            if role:
-                role_enum = RoleEnum(role)
-                if role_enum == RoleEnum.EMPLOYEE:
-                    users = db.get_all_employees()
-                elif role_enum == RoleEnum.MANAGER:
-                    users = db.get_all_managers()
+        try:
+            role = request.args.get('role')
+            
+            with DatabaseManager() as db:
+                if role:
+                    try:
+                        role_enum = RoleEnum(role.lower())  # Приводим к нижнему регистру
+                        if role_enum == RoleEnum.EMPLOYEE:
+                            users = db.get_all_employees()
+                        elif role_enum == RoleEnum.MANAGER:
+                            users = db.get_all_managers()
+                        else:
+                            users = db.db.query(User).filter(User.role == role_enum).all()
+                    except ValueError:
+                        # Неверная роль - возвращаем ошибку
+                        return {'error': f'Неверная роль: {role}. Доступные роли: admin, manager, employee'}, 400
                 else:
-                    users = db.db.query(User).filter(User.role == role_enum).all()
-            else:
-                users = db.db.query(User).all()
-            
-            result = []
-            for user in users:
-                result.append({
-                    'id': user.id,
-                    'telegram_id': user.telegram_id,
-                    'username': user.username,
-                    'full_name': user.full_name,
-                    'role': user.role.value,
-                    'is_active': user.is_active,
-                    'created_at': user.created_at.isoformat() if user.created_at else None
-                })
-            
-            return result
+                    users = db.db.query(User).all()
+                
+                result = []
+                for user in users:
+                    result.append({
+                        'id': user.id,
+                        'telegram_id': user.telegram_id,
+                        'username': user.username,
+                        'full_name': user.full_name,
+                        'role': user.role.value,
+                        'is_active': user.is_active,
+                        'created_at': user.created_at.isoformat() if user.created_at else None
+                    })
+                
+                return result
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка пользователей: {e}")
+            return {'error': f'Внутренняя ошибка сервера: {str(e)}'}, 500
 
 
 @users_ns.route('/<int:user_id>')
