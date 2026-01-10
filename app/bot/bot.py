@@ -29,6 +29,7 @@ from app.core.utils import logger, generate_csv_report, generate_pdf_report
 # Состояния для ConversationHandler
 SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
 SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(6, 8)
+SELECTING_STATUS = 8  # Состояние для выбора статуса заданий
 
 # Глобальные переменные для хранения данных при создании задания
 task_data = {}
@@ -364,54 +365,201 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @role_required(['admin', 'manager'])
 async def my_tasks_manager(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просмотр заданий начальника"""
+    """Начало просмотра заданий начальника с выбором статуса"""
     user = update.effective_user
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user.id)
-        tasks = db.get_tasks_by_manager(manager.id)
+        if not manager:
+            await update.message.reply_text("❌ Пользователь не найден.")
+            return ConversationHandler.END
+        
+        # Проверяем, есть ли вообще задания
+        all_tasks = db.get_tasks_by_manager(manager.id)
+        if not all_tasks:
+            await update.message.reply_text("📋 У вас пока нет созданных заданий.")
+            return ConversationHandler.END
+        
+        # Показываем клавиатуру для выбора статуса
+        keyboard = [
+            [InlineKeyboardButton("📋 Все задания", callback_data="mgr_status_all")],
+            [InlineKeyboardButton("🆕 Созданные (новые)", callback_data="mgr_status_created")],
+            [InlineKeyboardButton("✅ Полученные (в работе)", callback_data="mgr_status_received")],
+            [InlineKeyboardButton("✔️ Завершенные", callback_data="mgr_status_completed")],
+            [InlineKeyboardButton("🔒 Закрытые", callback_data="mgr_status_closed")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="mgr_status_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📋 Выберите статус заданий для просмотра:",
+            reply_markup=reply_markup
+        )
+        return SELECTING_STATUS
+
+
+@role_required(['admin', 'manager'])
+async def show_manager_tasks_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отображение заданий начальника по выбранному статусу"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "mgr_status_cancel":
+        await query.edit_message_text("❌ Просмотр заданий отменен.")
+        return ConversationHandler.END
+    
+    user = update.effective_user
+    status_param = query.data.replace("mgr_status_", "")
+    
+    with DatabaseManager() as db:
+        manager = db.get_user_by_telegram_id(user.id)
+        if not manager:
+            await query.edit_message_text("❌ Пользователь не найден.")
+            return ConversationHandler.END
+        
+        # Определяем статус для фильтрации
+        status_filter = None
+        status_name = "Все"
+        if status_param != "all":
+            try:
+                status_filter = TaskStatusEnum(status_param)
+                status_names = {
+                    "created": "Созданные",
+                    "received": "Полученные",
+                    "completed": "Завершенные",
+                    "closed": "Закрытые"
+                }
+                status_name = status_names.get(status_param, status_param)
+            except ValueError:
+                status_filter = None
+        
+        # Получаем задания с фильтром
+        tasks = db.get_tasks_by_manager(manager.id, status=status_filter)
         
         if not tasks:
-            await update.message.reply_text("📋 У вас пока нет созданных заданий.")
-            return
+            status_text = f"📋 У вас нет заданий со статусом '{status_name}'."
+            await query.edit_message_text(status_text)
+            return ConversationHandler.END
         
-        message = "📋 Ваши задания:\n\n"
-        for task in tasks[:10]:  # Показываем последние 10
-            status_emoji = {"created": "🆕", "received": "✅", "completed": "✔️", "closed": "🔒"}
-            message += f"{status_emoji.get(task.status.value, '❓')} Задание №{task.id}\n"
-            message += f"Сотрудник: {task.employee.full_name if task.employee else 'N/A'}\n"
-            message += f"Оборудование: {task.equipment.name if task.equipment else 'N/A'}\n"
-            message += f"Продукция: {task.product.name if task.product else 'N/A'}\n"
-            message += f"План: {task.planned_quantity} | Факт: {task.actual_quantity}\n"
-            message += f"Статус: {task.status.value}\n\n"
+        # Формируем сообщение с заданиями
+        message = f"📋 Ваши задания ({status_name}):\n\n"
+        status_emoji = {"created": "🆕", "received": "✅", "completed": "✔️", "closed": "🔒"}
         
-        await update.message.reply_text(message)
+        for task in tasks[:15]:  # Показываем до 15 заданий
+            emoji = status_emoji.get(task.status.value, '❓')
+            message += f"{emoji} Задание №{task.id}\n"
+            message += f"   Сотрудник: {task.employee.full_name if task.employee else 'N/A'}\n"
+            message += f"   Оборудование: {task.equipment.name if task.equipment else 'N/A'}\n"
+            message += f"   Продукция: {task.product.name if task.product else 'N/A'}\n"
+            message += f"   План: {task.planned_quantity}"
+            if task.actual_quantity:
+                message += f" | Факт: {task.actual_quantity}"
+            message += f"\n"
+            message += f"   Статус: {task.status.value}\n"
+            message += f"   Дата: {task.task_date.strftime('%d.%m.%Y') if task.task_date else 'N/A'}\n\n"
+        
+        if len(tasks) > 15:
+            message += f"\n... и еще {len(tasks) - 15} заданий"
+        
+        await query.edit_message_text(message)
+        return ConversationHandler.END
 
 
 async def my_tasks_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Просмотр заданий сотрудника"""
+    """Начало просмотра заданий сотрудника с выбором статуса"""
     user = update.effective_user
     with DatabaseManager() as db:
         employee = db.get_user_by_telegram_id(user.id)
         if not employee:
             await update.message.reply_text("❌ Пользователь не найден.")
-            return
+            return ConversationHandler.END
         
-        tasks = db.get_tasks_by_employee(employee.id)
+        # Проверяем, есть ли вообще задания
+        all_tasks = db.get_tasks_by_employee(employee.id)
+        if not all_tasks:
+            await update.message.reply_text("📋 У вас нет заданий.")
+            return ConversationHandler.END
+        
+        # Показываем клавиатуру для выбора статуса
+        keyboard = [
+            [InlineKeyboardButton("📋 Все задания", callback_data="status_all")],
+            [InlineKeyboardButton("🆕 Созданные (новые)", callback_data="status_created")],
+            [InlineKeyboardButton("✅ Полученные (в работе)", callback_data="status_received")],
+            [InlineKeyboardButton("✔️ Завершенные", callback_data="status_completed")],
+            [InlineKeyboardButton("🔒 Закрытые", callback_data="status_closed")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="status_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📋 Выберите статус заданий для просмотра:",
+            reply_markup=reply_markup
+        )
+        return SELECTING_STATUS
+
+
+async def show_tasks_by_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отображение заданий по выбранному статусу"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "status_cancel":
+        await query.edit_message_text("❌ Просмотр заданий отменен.")
+        return ConversationHandler.END
+    
+    user = update.effective_user
+    status_param = query.data.replace("status_", "")
+    
+    with DatabaseManager() as db:
+        employee = db.get_user_by_telegram_id(user.id)
+        if not employee:
+            await query.edit_message_text("❌ Пользователь не найден.")
+            return ConversationHandler.END
+        
+        # Определяем статус для фильтрации
+        status_filter = None
+        status_name = "Все"
+        if status_param != "all":
+            try:
+                status_filter = TaskStatusEnum(status_param)
+                status_names = {
+                    "created": "Созданные",
+                    "received": "Полученные",
+                    "completed": "Завершенные",
+                    "closed": "Закрытые"
+                }
+                status_name = status_names.get(status_param, status_param)
+            except ValueError:
+                status_filter = None
+        
+        # Получаем задания с фильтром
+        tasks = db.get_tasks_by_employee(employee.id, status=status_filter)
         
         if not tasks:
-            await update.message.reply_text("📋 У вас нет заданий.")
-            return
+            status_text = f"📋 У вас нет заданий со статусом '{status_name}'."
+            await query.edit_message_text(status_text)
+            return ConversationHandler.END
         
-        message = "📋 Ваши задания:\n\n"
-        for task in tasks[:10]:  # Показываем последние 10
-            status_emoji = {"created": "🆕", "received": "✅", "completed": "✔️", "closed": "🔒"}
-            message += f"{status_emoji.get(task.status.value, '❓')} Задание №{task.id}\n"
-            message += f"Оборудование: {task.equipment.name if task.equipment else 'N/A'}\n"
-            message += f"Продукция: {task.product.name if task.product else 'N/A'}\n"
-            message += f"Количество: {task.planned_quantity}\n"
-            message += f"Статус: {task.status.value}\n\n"
+        # Формируем сообщение с заданиями
+        message = f"📋 Ваши задания ({status_name}):\n\n"
+        status_emoji = {"created": "🆕", "received": "✅", "completed": "✔️", "closed": "🔒"}
         
-        await update.message.reply_text(message)
+        for task in tasks[:15]:  # Показываем до 15 заданий
+            emoji = status_emoji.get(task.status.value, '❓')
+            message += f"{emoji} Задание №{task.id}\n"
+            message += f"   Оборудование: {task.equipment.name if task.equipment else 'N/A'}\n"
+            message += f"   Продукция: {task.product.name if task.product else 'N/A'}\n"
+            message += f"   Количество: {task.planned_quantity}"
+            if task.actual_quantity:
+                message += f" | Факт: {task.actual_quantity}"
+            message += f"\n"
+            message += f"   Статус: {task.status.value}\n"
+            message += f"   Дата: {task.task_date.strftime('%d.%m.%Y') if task.task_date else 'N/A'}\n\n"
+        
+        if len(tasks) > 15:
+            message += f"\n... и еще {len(tasks) - 15} заданий"
+        
+        await query.edit_message_text(message)
+        return ConversationHandler.END
 
 
 async def confirm_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -707,11 +855,25 @@ def main():
     )
     application.add_handler(create_task_handler)
     
-    # Обработчик просмотра заданий начальника
-    application.add_handler(MessageHandler(filters.Regex("^📊 Мои задания$"), my_tasks_manager))
+    # Обработчик просмотра заданий начальника с фильтрацией по статусу
+    my_tasks_manager_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📊 Мои задания$"), my_tasks_manager)],
+        states={
+            SELECTING_STATUS: [CallbackQueryHandler(show_manager_tasks_by_status, pattern="^mgr_status_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
+    )
+    application.add_handler(my_tasks_manager_handler)
     
-    # Обработчик просмотра заданий сотрудника
-    application.add_handler(MessageHandler(filters.Regex("^📋 Мои задания$"), my_tasks_employee))
+    # Обработчик просмотра заданий сотрудника с фильтрацией по статусу
+    my_tasks_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📋 Мои задания$"), my_tasks_employee)],
+        states={
+            SELECTING_STATUS: [CallbackQueryHandler(show_tasks_by_status, pattern="^status_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
+    )
+    application.add_handler(my_tasks_handler)
     
     # Обработчик подтверждения задания сотрудником
     application.add_handler(MessageHandler(filters.Regex("^✅ Подтвердить задание$"), confirm_task_start))
