@@ -152,18 +152,50 @@ jobs:
             echo "\$GITHUB_TOKEN" | docker login \$REGISTRY -u \$GITHUB_ACTOR --password-stdin
             
             # Останавливаем и удаляем старые контейнеры (более надежный способ)
-            echo "Stopping existing containers..."
+            echo "Stopping and removing existing containers..."
             for container in tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin; do
-              if docker ps -a --format '{{.Names}}' | grep -q "^${container}\$"; then
-                echo "Stopping and removing container: ${container}"
-                docker stop ${container} 2>/dev/null || true
-                docker rm -f ${container} 2>/dev/null || true
+              # Проверяем существование контейнера (запущенного или остановленного)
+              CONTAINER_ID=\$(docker ps -a -q -f name=^/\${container}\$ 2>/dev/null || true)
+              if [ -n "\$CONTAINER_ID" ]; then
+                echo "Found container: \${container} (ID: \$CONTAINER_ID)"
+                echo "Stopping container: \${container}"
+                docker stop \${container} 2>/dev/null || true
+                sleep 1
+                echo "Removing container: \${container}"
+                docker rm -f \${container} 2>/dev/null || true
+                # Проверяем, что контейнер удален
+                if docker ps -a -q -f name=^/\${container}\$ 2>/dev/null | grep -q .; then
+                  echo "⚠️  Warning: Container \${container} still exists, forcing removal..."
+                  docker rm -f \${container} 2>/dev/null || true
+                else
+                  echo "✅ Container \${container} removed successfully"
+                fi
+              else
+                echo "No existing container found: \${container}"
               fi
             done
             
-            # Ждем освобождения портов
-            echo "Waiting for ports to be released..."
-            sleep 3
+            # Дополнительная проверка и принудительное удаление всех контейнеров с этими именами
+            echo "Performing final cleanup..."
+            docker stop tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
+            docker rm -f tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
+            
+            # Ждем освобождения портов и ресурсов Docker
+            echo "Waiting for Docker to release resources..."
+            sleep 5
+            
+            # Финальная проверка - убеждаемся, что контейнеры удалены
+            echo "Verifying containers are removed..."
+            for container in tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin; do
+              if docker ps -a -q -f name=^/\${container}\$ 2>/dev/null | grep -q .; then
+                echo "⚠️  Warning: Container \${container} still exists! Force removing..."
+                docker stop \${container} 2>/dev/null || true
+                docker rm -f \${container} 2>/dev/null || true
+                sleep 2
+              else
+                echo "✅ Container \${container} is removed"
+              fi
+            done
             
             # Проверяем и принудительно освобождаем порты, если они заняты
             echo "Checking port 5051..."
@@ -204,6 +236,13 @@ jobs:
             fi
             
             # Запускаем бота
+            echo "Starting bot container..."
+            # Проверяем и удаляем контейнер, если он все еще существует
+            if docker ps -a -q -f name=^/tg_bot_task_manager\$ 2>/dev/null | grep -q .; then
+              echo "⚠️  Bot container still exists, removing..."
+              docker rm -f tg_bot_task_manager 2>/dev/null || true
+              sleep 1
+            fi
             docker run -d \
               --name tg_bot_task_manager \
               --restart unless-stopped \
@@ -215,6 +254,13 @@ jobs:
               \$ACTUAL_IMAGE python bot.py
             
             # Запускаем API
+            echo "Starting API container..."
+            # Проверяем и удаляем контейнер, если он все еще существует
+            if docker ps -a -q -f name=^/tg_bot_task_manager_api\$ 2>/dev/null | grep -q .; then
+              echo "⚠️  API container still exists, removing..."
+              docker rm -f tg_bot_task_manager_api 2>/dev/null || true
+              sleep 1
+            fi
             docker run -d \
               --name tg_bot_task_manager_api \
               --restart unless-stopped \
@@ -228,6 +274,12 @@ jobs:
             
             # Запускаем админ-панель
             echo "Starting admin panel container..."
+            # Проверяем и удаляем контейнер, если он все еще существует
+            if docker ps -a -q -f name=^/tg_bot_task_manager_admin\$ 2>/dev/null | grep -q .; then
+              echo "⚠️  Admin container still exists, removing..."
+              docker rm -f tg_bot_task_manager_admin 2>/dev/null || true
+              sleep 1
+            fi
             if ! docker run -d \
               --name tg_bot_task_manager_admin \
               --restart unless-stopped \
