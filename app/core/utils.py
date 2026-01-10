@@ -12,12 +12,14 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import cm
 import pandas as pd
-from config import ENCRYPTION_KEY
+from .config import ENCRYPTION_KEY
 
 # Настройка логирования
 def setup_logging(log_file='bot.log', log_level=logging.INFO):
     """Настройка системы логирования"""
-    log_dir = Path('logs')
+    # Ищем папку logs в корне проекта (на 2 уровня выше от app/core)
+    project_root = Path(__file__).parent.parent.parent
+    log_dir = project_root / 'logs'
     log_dir.mkdir(exist_ok=True)
     
     log_path = log_dir / log_file
@@ -94,8 +96,14 @@ def generate_csv_report(tasks, output_path='reports/report.csv'):
         tasks: список заданий (объекты Task или словари)
         output_path: путь для сохранения отчета
     """
-    report_dir = Path(output_path).parent
+    # Если путь относительный, создаем его относительно корня проекта
+    report_path = Path(output_path)
+    if not report_path.is_absolute():
+        project_root = Path(__file__).parent.parent.parent
+        report_path = project_root / output_path
+    report_dir = report_path.parent
     report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(report_path)
     
     # Подготовка данных
     data = []
@@ -140,8 +148,14 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
         output_path: путь для сохранения отчета
         title: заголовок отчета
     """
-    report_dir = Path(output_path).parent
+    # Если путь относительный, создаем его относительно корня проекта
+    report_path = Path(output_path)
+    if not report_path.is_absolute():
+        project_root = Path(__file__).parent.parent.parent
+        report_path = project_root / output_path
+    report_dir = report_path.parent
     report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(report_path)
     
     doc = SimpleDocTemplate(output_path, pagesize=A4)
     story = []

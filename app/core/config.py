@@ -6,7 +6,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения из .env
-env_path = Path(__file__).parent / '.env'
+# Ищем .env файл в корне проекта (на 2 уровня выше)
+env_path = Path(__file__).parent.parent.parent / '.env'
+if not env_path.exists():
+    # Если не найден, пробуем на 1 уровень выше (для совместимости)
+    env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # Telegram Bot
@@ -22,6 +26,11 @@ ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', '')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5050))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+
+# Admin Panel
+ADMIN_HOST = os.getenv('ADMIN_HOST', '0.0.0.0')
+ADMIN_PORT = int(os.getenv('ADMIN_PORT', 5051))
+ADMIN_DEBUG = os.getenv('ADMIN_DEBUG', 'False').lower() == 'true'
 
 # Logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')

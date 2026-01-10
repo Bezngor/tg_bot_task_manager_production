@@ -6,11 +6,14 @@ from flask import Flask, render_template_string, request, redirect, url_for, fla
 import sys
 import os
 
-# Добавляем путь к модулям приложения
-sys.path.insert(0, '/app')
+# Добавляем путь к модулям приложения (для совместимости с Docker)
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
-from database import DatabaseManager, RoleEnum
-from models import User, Equipment, Product, Workshop
+from app.core.database import DatabaseManager, RoleEnum
+from app.core.models import User, Equipment, Product, Workshop
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'admin-panel-secret-key-change-in-production')

@@ -37,7 +37,7 @@ docker run -d \
     -v "$SCRIPT_DIR/logs:/app/logs" \
     -v "$SCRIPT_DIR/reports:/app/reports" \
     "$IMAGE" \
-    python api.py
+    python -m app.api.api
 
 if [ $? -eq 0 ]; then
     echo "API контейнер успешно запущен!"

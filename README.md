@@ -94,7 +94,13 @@ print(key.decode())
 ### Запуск Telegram-бота
 
 ```bash
-python bot.py
+python -m app.bot.bot
+```
+
+или через модуль:
+
+```bash
+python -m app.bot.bot
 ```
 
 ### Запуск REST API
@@ -102,24 +108,32 @@ python bot.py
 В отдельном терминале:
 
 ```bash
-python api.py
+python -m app.api.api
 ```
 
 API будет доступен по адресу: `http://localhost:5050`
 Swagger документация: `http://localhost:5050/swagger/`
 
-## Инициализация данных
+### Запуск админ-панели
 
-Для создания тестовых данных (участки, оборудование, продукция) раскомментируйте строку в `bot.py`:
-
-```python
-# init_sample_data()
+```bash
+python -m app.admin.admin_panel
 ```
 
-Или выполните в Python:
+Админ-панель будет доступна по адресу: `http://localhost:5051`
+
+## Инициализация данных
+
+Для создания тестовых данных (участки, оборудование, продукция) выполните:
+
+```bash
+python scripts/init_data.py
+```
+
+Или из Python:
 
 ```python
-from database import init_sample_data
+from app.core.database import init_sample_data
 init_sample_data()
 ```
 
@@ -127,17 +141,47 @@ init_sample_data()
 
 ```
 TG_bot_midex_task_manager_production/
-├── bot.py              # Основной файл Telegram-бота
-├── api.py              # REST API на Flask
-├── models.py           # Модели данных SQLAlchemy
-├── database.py         # Модуль работы с БД
-├── utils.py            # Утилиты (шифрование, отчеты, логирование)
-├── config.py           # Конфигурация приложения
-├── requirements.txt    # Зависимости проекта
-├── .env               # Переменные окружения (не коммитится)
-├── task_manager.db    # База данных SQLite (создается автоматически)
-├── logs/              # Папка с логами
-└── reports/           # Папка с отчетами (CSV, PDF)
+├── app/                      # Основной код приложения
+│   ├── __init__.py
+│   ├── core/                 # Ядро приложения (общий код)
+│   │   ├── __init__.py
+│   │   ├── config.py         # Конфигурация приложения
+│   │   ├── models.py         # Модели данных SQLAlchemy
+│   │   ├── database.py       # Модуль работы с БД
+│   │   └── utils.py          # Утилиты (шифрование, отчеты, логирование)
+│   ├── bot/                  # Telegram бот
+│   │   ├── __init__.py
+│   │   ├── bot.py            # Основной файл Telegram-бота
+│   │   └── handlers/         # Обработчики команд (для будущего расширения)
+│   │       └── __init__.py
+│   ├── api/                  # REST API
+│   │   ├── __init__.py
+│   │   ├── api.py            # REST API на Flask
+│   │   └── namespaces/       # API namespaces (для будущего расширения)
+│   │       └── __init__.py
+│   └── admin/                # Админ-панель
+│       ├── __init__.py
+│       └── admin_panel.py    # Веб-интерфейс админ-панели
+├── scripts/                  # Скрипты для запуска и утилиты
+│   └── init_data.py          # Скрипт инициализации данных
+├── docs/                     # Документация
+│   ├── ADMIN_PANEL.md
+│   ├── DEPLOYMENT.md
+│   ├── USER_GUIDE.md
+│   └── ...
+├── docker/                   # Docker конфигурации (опционально)
+│   ├── Dockerfile
+│   └── docker-compose.yml
+├── logs/                     # Папка с логами (создается автоматически)
+├── reports/                  # Папка с отчетами (CSV, PDF, создается автоматически)
+├── data/                     # Папка для данных (опционально)
+├── requirements.txt          # Зависимости проекта
+├── .env                      # Переменные окружения (не коммитится)
+├── .env.example              # Пример файла окружения
+├── Dockerfile                # Dockerfile для сборки образа
+├── docker-compose.yml        # Docker Compose конфигурация
+├── README.md                 # Документация проекта
+└── task_manager.db           # База данных SQLite (создается автоматически)
 ```
 
 ## Использование
@@ -256,7 +300,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/task_manager
 Environment="PATH=/opt/task_manager/venv/bin"
-ExecStart=/opt/task_manager/venv/bin/python /opt/task_manager/bot.py
+ExecStart=/opt/task_manager/venv/bin/python -m app.bot.bot
 Restart=always
 
 [Install]
@@ -275,7 +319,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/task_manager
 Environment="PATH=/opt/task_manager/venv/bin"
-ExecStart=/opt/task_manager/venv/bin/python /opt/task_manager/api.py
+ExecStart=/opt/task_manager/venv/bin/python -m app.api.api
 Restart=always
 
 [Install]

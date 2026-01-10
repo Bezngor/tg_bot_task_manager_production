@@ -3,9 +3,9 @@
 """
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, scoped_session
-from models import Base, User, Workshop, Equipment, Product, ProductEquipment, Task, Notification, RoleEnum, ShiftEnum, TaskStatusEnum
-from config import DATABASE_URL
-from utils import logger
+from .models import Base, User, Workshop, Equipment, Product, ProductEquipment, Task, Notification, RoleEnum, ShiftEnum, TaskStatusEnum
+from .config import DATABASE_URL
+from .utils import logger
 from datetime import datetime
 
 # Создание движка БД

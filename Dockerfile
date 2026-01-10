@@ -29,5 +29,6 @@ ENV DATABASE_URL=sqlite:///task_manager.db
 EXPOSE 5050
 
 # Команда по умолчанию - запуск бота
-# Для запуска API используйте: python api.py
-CMD ["python", "bot.py"]
+# Для запуска API используйте: python -m app.api.api
+# Для запуска админ-панели используйте: python -m app.admin.admin_panel
+CMD ["python", "-m", "app.bot.bot"]

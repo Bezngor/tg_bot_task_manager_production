@@ -1,0 +1,3 @@
+"""
+API Namespaces (Flask-RESTX)
+"""

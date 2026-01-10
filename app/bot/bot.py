@@ -1,6 +1,15 @@
 """
 Основной файл Telegram-бота
 """
+import sys
+import os
+from pathlib import Path
+
+# Добавляем корневую директорию проекта в sys.path для корректных импортов
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import logging
 from datetime import datetime, date
 from typing import Optional
@@ -10,11 +19,12 @@ from telegram.ext import (
     ContextTypes, ConversationHandler, filters
 )
 from telegram.constants import ParseMode
+from telegram.error import Conflict, NetworkError, TimedOut
 
-from config import TELEGRAM_BOT_TOKEN, Roles, Shifts
-from database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
-from models import User
-from utils import logger, generate_csv_report, generate_pdf_report
+from app.core.config import TELEGRAM_BOT_TOKEN, Roles, Shifts
+from app.core.database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
+from app.core.models import User
+from app.core.utils import logger, generate_csv_report, generate_pdf_report
 
 # Состояния для ConversationHandler
 SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
@@ -32,30 +42,29 @@ class Command:
         raise NotImplementedError
 
 
-class StartCommand(Command):
-    """Команда /start"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user = update.effective_user
     
-    def execute(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        with DatabaseManager() as db:
-            db_user = db.get_user_by_telegram_id(user.id)
-            
-            if not db_user:
-                # Регистрация нового пользователя
-                db_user = db.create_user(
-                    telegram_id=user.id,
-                    username=user.username,
-                    full_name=user.full_name or user.username or f"User {user.id}",
-                    role=RoleEnum.EMPLOYEE  # По умолчанию сотрудник
-                )
-                message = f"Добро пожаловать, {user.first_name}!\n\nВы зарегистрированы как сотрудник."
-            else:
-                role_name = {"admin": "Администратор", "manager": "Начальник", "employee": "Сотрудник"}
-                message = f"Добро пожаловать обратно, {user.first_name}!\n\nВаша роль: {role_name.get(db_user.role.value, 'Неизвестна')}"
+    with DatabaseManager() as db:
+        db_user = db.get_user_by_telegram_id(user.id)
         
-        keyboard = get_main_keyboard(db_user.role.value if db_user else 'employee')
-        update.message.reply_text(message, reply_markup=keyboard)
-        logger.info(f"Пользователь {user.id} выполнил команду /start")
+        if not db_user:
+            # Регистрация нового пользователя
+            db_user = db.create_user(
+                telegram_id=user.id,
+                username=user.username,
+                full_name=user.full_name or user.username or f"User {user.id}",
+                role=RoleEnum.EMPLOYEE  # По умолчанию сотрудник
+            )
+            message = f"Добро пожаловать, {user.first_name}!\n\nВы зарегистрированы как сотрудник."
+        else:
+            role_name = {"admin": "Администратор", "manager": "Начальник", "employee": "Сотрудник"}
+            message = f"Добро пожаловать обратно, {user.first_name}!\n\nВаша роль: {role_name.get(db_user.role.value, 'Неизвестна')}"
+    
+    keyboard = get_main_keyboard(db_user.role.value if db_user else 'employee')
+    await update.message.reply_text(message, reply_markup=keyboard)
+    logger.info(f"Пользователь {user.id} выполнил команду /start")
 
 
 def get_main_keyboard(role: str):
@@ -86,12 +95,6 @@ def role_required(required_roles: list):
             return await func(update, context, *args, **kwargs)
         return wrapper
     return decorator
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    command = StartCommand()
-    command.execute(update, context)
 
 
 @role_required(['admin', 'manager'])
@@ -629,6 +632,48 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок для логирования и уведомления пользователей"""
+    error = context.error
+    
+    # Обработка конфликта - несколько экземпляров бота запущены одновременно
+    if isinstance(error, Conflict):
+        logger.critical(
+            "CONFLICT: Другой экземпляр бота уже запущен! "
+            "Убедитесь, что запущен только один экземпляр бота. "
+            "Возможные причины:\n"
+            "  1. Развернутая версия бота работает на сервере (Docker контейнер)\n"
+            "  2. Бот запущен в другом терминале/окне\n"
+            "  3. Другой процесс использует тот же токен бота\n"
+            "Решения:\n"
+            "  - Для локальной разработки: остановите развернутую версию на сервере\n"
+            "  - Или используйте отдельный токен бота для разработки"
+        )
+        # Для Conflict не отправляем сообщение пользователю - это системная ошибка
+        # Останавливаем программу, чтобы не продолжать работу при конфликте
+        sys.exit(1)
+    
+    # Обработка сетевых ошибок и таймаутов
+    if isinstance(error, (NetworkError, TimedOut)):
+        logger.warning(f"Network error occurred: {error}. Retrying...")
+        # Для сетевых ошибок также не отправляем сообщение пользователю
+        return
+    
+    # Для остальных ошибок логируем и отправляем сообщение пользователю
+    logger.error(f"Exception while handling an update: {error}", exc_info=error)
+    
+    # Если есть update, пытаемся отправить пользователю сообщение об ошибке
+    if update and isinstance(update, Update):
+        try:
+            message = "❌ Произошла ошибка при обработке запроса. Пожалуйста, попробуйте позже или обратитесь к администратору."
+            if update.effective_message:
+                await update.effective_message.reply_text(message)
+            elif update.effective_chat:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+        except Exception as e:
+            logger.error(f"Error while sending error message to user: {e}", exc_info=e)
+
+
 def main():
     """Главная функция запуска бота"""
     if not TELEGRAM_BOT_TOKEN:
@@ -636,7 +681,7 @@ def main():
         return
     
     # Инициализация БД
-    from database import init_db, init_sample_data
+    from app.core.database import init_db, init_sample_data
     init_db()
     # Раскомментируйте следующую строку для создания тестовых данных
     # init_sample_data()
@@ -689,10 +734,49 @@ def main():
     # Обработчик уведомлений
     application.add_handler(MessageHandler(filters.Regex("^🔔 Уведомления$"), show_notifications))
     
+    # Регистрация обработчика ошибок
+    application.add_error_handler(error_handler)
+    
     logger.info("Бот запущен и готов к работе")
     
-    # Запуск бота
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Запуск бота
+        # run_polling автоматически обрабатывает KeyboardInterrupt и корректно завершает работу
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+    except KeyboardInterrupt:
+        # run_polling уже корректно обработал остановку
+        logger.info("Бот остановлен пользователем (Ctrl+C)")
+        print("\nБот остановлен. Подождите 3-5 секунд перед повторным запуском.")
+    except Conflict as e:
+        # Этот блок вряд ли будет выполнен, так как error_handler обрабатывает Conflict первым
+        # и вызывает sys.exit(1). Оставляем для отладки на случай, если error_handler не сработает.
+        logger.critical(
+            "КРИТИЧЕСКАЯ ОШИБКА: Другой экземпляр бота уже запущен!\n"
+            "Убедитесь, что запущен только один экземпляр бота.\n"
+            "Остановите все другие экземпляры перед запуском."
+        )
+        print("\n" + "="*70)
+        print("ОШИБКА: Другой экземпляр бота уже запущен!")
+        print("="*70)
+        print("\nВозможные причины:")
+        print("  • Развернутая версия бота работает на сервере (Docker)")
+        print("  • Бот запущен в другом терминале/процессе")
+        print("  • Другой процесс использует тот же токен бота")
+        print("\nРешения:")
+        print("  1. Остановите развернутый бот на сервере:")
+        print("     ssh user@server 'docker stop tg_bot_task_manager'")
+        print("\n  2. Или проверьте локальные процессы Python:")
+        print("     Windows: Get-Process python | Where-Object {$_.Path -like '*bot*'}")
+        print("     Linux:   ps aux | grep 'bot.py'")
+        print("\n  3. Подождите 5-10 секунд после остановки перед повторным запуском")
+        print("="*70 + "\n")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=e)
+        raise
 
 
 if __name__ == '__main__':

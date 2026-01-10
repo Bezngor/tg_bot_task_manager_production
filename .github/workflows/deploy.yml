@@ -152,8 +152,8 @@ jobs:
             echo "\$GITHUB_TOKEN" | docker login \$REGISTRY -u \$GITHUB_ACTOR --password-stdin
             
             # Останавливаем и удаляем старые контейнеры
-            docker stop tg_bot_task_manager tg_bot_task_manager_api 2>/dev/null || true
-            docker rm tg_bot_task_manager tg_bot_task_manager_api 2>/dev/null || true
+            docker stop tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
+            docker rm tg_bot_task_manager tg_bot_task_manager_api tg_bot_task_manager_admin 2>/dev/null || true
             
             # Скачиваем новый образ (сначала пробуем по тегу, затем latest)
             docker pull \$IMAGE_FULL || docker pull \$IMAGE_LATEST || true
@@ -192,8 +192,20 @@ jobs:
               -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
               \$ACTUAL_IMAGE python api.py
             
+            # Запускаем админ-панель
+            docker run -d \
+              --name tg_bot_task_manager_admin \
+              --restart unless-stopped \
+              \$ENV_FILE_OPTION \
+              -p 5051:5051 \
+              -v \$DEPLOY_DIR/data:/app/data \
+              -v \$DEPLOY_DIR/logs:/app/logs \
+              -v \$DEPLOY_DIR/reports:/app/reports \
+              -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
+              \$ACTUAL_IMAGE python -m app.admin.admin_panel
+            
             # Проверяем статус контейнеров
-            docker ps | grep -E "tg_bot_task_manager|tg_bot_task_manager_api" || true
+            docker ps | grep -E "tg_bot_task_manager|tg_bot_task_manager_api|tg_bot_task_manager_admin" || true
             
             # Очистка старых образов (опционально)
             docker image prune -f
@@ -206,4 +218,6 @@ jobs:
           echo "✅ Deployment completed!"
           echo "Bot container: tg_bot_task_manager"
           echo "API container: tg_bot_task_manager_api"
+          echo "Admin panel container: tg_bot_task_manager_admin"
+          echo "Admin panel URL: http://155.212.184.11:5051"
           echo "Image: ${{ env.REGISTRY }}/${{ steps.repo-name.outputs.REPO_LOWER }}:${{ github.ref_name }}"
