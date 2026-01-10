@@ -326,7 +326,7 @@ jobs:
               -v \$DEPLOY_DIR/logs:/app/logs \
               -v \$DEPLOY_DIR/reports:/app/reports \
               -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
-              \$ACTUAL_IMAGE python bot.py
+              \$ACTUAL_IMAGE python -m app.bot.bot
             
             # Запускаем API
             echo "Starting API container..."
@@ -345,7 +345,7 @@ jobs:
               -v \$DEPLOY_DIR/logs:/app/logs \
               -v \$DEPLOY_DIR/reports:/app/reports \
               -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
-              \$ACTUAL_IMAGE python api.py
+              \$ACTUAL_IMAGE python -m app.api.api
             
             # Запускаем админ-панель
             echo "Starting admin panel container..."
@@ -442,14 +442,24 @@ jobs:
             # Проверяем, что все контейнеры запущены
             if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager\$"; then
               echo "⚠️  Warning: Bot container may not be running"
+              echo "Bot container logs:"
+              docker logs tg_bot_task_manager 2>/dev/null | tail -30 || echo "No logs available"
+            else
+              echo "✅ Bot container is running"
+              echo "Bot container logs (last 15 lines):"
+              docker logs tg_bot_task_manager 2>/dev/null | tail -15 || echo "No logs available"
             fi
             if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager_api\$"; then
               echo "⚠️  Warning: API container may not be running"
+            else
+              echo "✅ API container is running"
             fi
             if ! docker ps --format '{{.Names}}' | grep -q "^tg_bot_task_manager_admin\$"; then
               echo "❌ Error: Admin panel container is not running"
               docker logs tg_bot_task_manager_admin 2>/dev/null | tail -20 || true
               exit 1
+            else
+              echo "✅ Admin panel container is running"
             fi
             
             # Очистка старых образов (опционально)
