@@ -11,6 +11,8 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import pandas as pd
 from .config import ENCRYPTION_KEY
 
@@ -139,6 +141,93 @@ def generate_csv_report(tasks, output_path='reports/report.csv'):
     return output_path
 
 
+def _register_cyrillic_font():
+    """Регистрирует шрифт с поддержкой кириллицы"""
+    font_name = 'CyrillicFont'
+    font_bold_name = 'CyrillicFont-Bold'
+    
+    # Проверяем, не зарегистрирован ли уже шрифт
+    if font_name in pdfmetrics.getRegisteredFontNames():
+        return font_name, font_bold_name
+    
+    # Пути к возможным системным шрифтам с поддержкой кириллицы
+    import platform
+    system = platform.system()
+    
+    font_paths = []
+    bold_font_paths = []
+    
+    if system == 'Windows':
+        # Windows - стандартные пути к шрифтам
+        windir = os.environ.get('WINDIR', 'C:\\Windows')
+        font_paths = [
+            os.path.join(windir, 'Fonts', 'arial.ttf'),
+            os.path.join(windir, 'Fonts', 'Arial.ttf'),
+            os.path.join(windir, 'Fonts', 'calibri.ttf'),
+            os.path.join(windir, 'Fonts', 'Calibri.ttf'),
+        ]
+        bold_font_paths = [
+            os.path.join(windir, 'Fonts', 'arialbd.ttf'),
+            os.path.join(windir, 'Fonts', 'Arial Bold.ttf'),
+            os.path.join(windir, 'Fonts', 'calibrib.ttf'),
+            os.path.join(windir, 'Fonts', 'Calibri Bold.ttf'),
+        ]
+    elif system == 'Linux':
+        # Linux - стандартные пути к шрифтам
+        font_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/usr/share/fonts/TTF/DejaVuSans.ttf',
+        ]
+        bold_font_paths = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+            '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf',
+        ]
+    elif system == 'Darwin':  # macOS
+        font_paths = [
+            '/System/Library/Fonts/Helvetica.ttc',
+            '/Library/Fonts/Arial.ttf',
+        ]
+        bold_font_paths = [
+            '/System/Library/Fonts/Helvetica.ttc',
+            '/Library/Fonts/Arial Bold.ttf',
+        ]
+    
+    # Пытаемся найти и зарегистрировать обычный шрифт
+    regular_font = None
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, path))
+                regular_font = font_name
+                logger.info(f"Зарегистрирован шрифт для кириллицы: {path}")
+                break
+            except Exception as e:
+                logger.warning(f"Не удалось зарегистрировать шрифт {path}: {e}")
+                continue
+    
+    # Пытаемся найти и зарегистрировать жирный шрифт
+    bold_font = None
+    for path in bold_font_paths:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont(font_bold_name, path))
+                bold_font = font_bold_name
+                logger.info(f"Зарегистрирован жирный шрифт для кириллицы: {path}")
+                break
+            except Exception as e:
+                logger.warning(f"Не удалось зарегистрировать жирный шрифт {path}: {e}")
+                continue
+    
+    # Если не нашли шрифт, используем встроенные шрифты ReportLab (могут не поддерживать кириллицу)
+    if not regular_font:
+        logger.warning("Шрифт с поддержкой кириллицы не найден. Кириллические символы могут отображаться некорректно.")
+        return 'Helvetica', 'Helvetica-Bold'
+    
+    return regular_font, (bold_font or regular_font)
+
+
 def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отчет по заданиям'):
     """
     Генерация отчета в формате PDF
@@ -157,60 +246,99 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
     report_dir.mkdir(parents=True, exist_ok=True)
     output_path = str(report_path)
     
+    # Регистрируем шрифт с поддержкой кириллицы
+    regular_font, bold_font = _register_cyrillic_font()
+    
     doc = SimpleDocTemplate(output_path, pagesize=A4)
     story = []
     styles = getSampleStyleSheet()
+    
+    # Функция для экранирования HTML-специальных символов
+    def escape_html(text):
+        """Экранирует HTML-специальные символы для безопасного использования в Paragraph"""
+        if text is None:
+            return ''
+        text = str(text)
+        text = text.replace('&', '&amp;')
+        text = text.replace('<', '&lt;')
+        text = text.replace('>', '&gt;')
+        return text
+    
+    # Стиль для заголовка таблицы
+    header_style = ParagraphStyle(
+        'Header',
+        parent=styles['Normal'],
+        fontName=bold_font,
+        fontSize=8,
+        textColor=colors.whitesmoke,
+        alignment=1,  # Center
+        leading=10
+    )
+    
+    # Стиль для ячеек таблицы
+    cell_style = ParagraphStyle(
+        'Cell',
+        parent=styles['Normal'],
+        fontName=regular_font,
+        fontSize=7,
+        alignment=1,  # Center
+        leading=8
+    )
     
     # Заголовок
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
+        fontName=bold_font,
         fontSize=18,
         textColor=colors.HexColor('#1a1a1a'),
         spaceAfter=30,
         alignment=1  # Center
     )
-    story.append(Paragraph(title, title_style))
+    story.append(Paragraph(escape_html(title), title_style))
     story.append(Spacer(1, 0.5*cm))
     
     # Дата генерации
     date_style = ParagraphStyle(
         'DateStyle',
         parent=styles['Normal'],
+        fontName=regular_font,
         fontSize=10,
         textColor=colors.grey,
         alignment=1
     )
-    story.append(Paragraph(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}", date_style))
+    story.append(Paragraph(escape_html(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"), date_style))
     story.append(Spacer(1, 1*cm))
     
     # Подготовка данных для таблицы
-    table_data = [['ID', 'Дата', 'Смена', 'Сотрудник', 'Оборудование', 'Продукция', 'План', 'Факт', 'Статус']]
+    # Заголовки таблицы
+    headers = ['ID', 'Дата', 'Смена', 'Сотрудник', 'Оборудование', 'Продукция', 'План', 'Факт', 'Статус']
+    table_data = [[Paragraph(escape_html(header), header_style) for header in headers]]
     
     for task in tasks:
         if hasattr(task, '__dict__'):
             row = [
-                str(task.id),
-                task.task_date.strftime('%d.%m.%Y') if task.task_date else '',
-                '1-я' if task.shift.value == 1 else '2-я',
-                task.employee.full_name if task.employee else f"ID:{task.employee_id}",
-                task.equipment.name if task.equipment else f"ID:{task.equipment_id}",
-                task.product.name if task.product else f"ID:{task.product_id}",
-                str(task.planned_quantity),
-                str(task.actual_quantity),
-                task.status.value
+                Paragraph(escape_html(str(task.id)), cell_style),
+                Paragraph(escape_html(task.task_date.strftime('%d.%m.%Y') if task.task_date else ''), cell_style),
+                Paragraph(escape_html('1-я' if task.shift.value == 1 else '2-я'), cell_style),
+                Paragraph(escape_html(task.employee.full_name if task.employee else f"ID:{task.employee_id}"), cell_style),
+                Paragraph(escape_html(task.equipment.name if task.equipment else f"ID:{task.equipment_id}"), cell_style),
+                Paragraph(escape_html(task.product.name if task.product else f"ID:{task.product_id}"), cell_style),
+                Paragraph(escape_html(str(task.planned_quantity)), cell_style),
+                Paragraph(escape_html(str(task.actual_quantity)), cell_style),
+                Paragraph(escape_html(task.status.value), cell_style)
             ]
         else:
             row = [
-                str(task.get('id', '')),
-                task.get('task_date', ''),
-                task.get('shift', ''),
-                task.get('employee', ''),
-                task.get('equipment', ''),
-                task.get('product', ''),
-                str(task.get('planned_quantity', '')),
-                str(task.get('actual_quantity', '')),
-                task.get('status', '')
+                Paragraph(escape_html(str(task.get('id', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('task_date', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('shift', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('employee', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('equipment', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('product', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('planned_quantity', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('actual_quantity', ''))), cell_style),
+                Paragraph(escape_html(str(task.get('status', ''))), cell_style)
             ]
         table_data.append(row)
     
@@ -220,7 +348,6 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4472C4')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 8),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
         ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
