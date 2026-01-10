@@ -6,7 +6,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения из .env
-env_path = Path(__file__).parent / '.env'
+# Ищем .env файл в корне проекта (на 2 уровня выше)
+env_path = Path(__file__).parent.parent.parent / '.env'
+if not env_path.exists():
+    # Если не найден, пробуем на 1 уровень выше (для совместимости)
+    env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 # Telegram Bot

@@ -6,12 +6,15 @@ from flask import Flask, render_template_string, request, redirect, url_for, fla
 import sys
 import os
 
-# Добавляем путь к модулям приложения
-sys.path.insert(0, '/app')
+# Добавляем путь к модулям приложения (для совместимости с Docker)
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-from database import DatabaseManager, RoleEnum
-from models import User, Equipment, Product, ProductEquipment, Workshop
-from sqlalchemy import Column, Integer, String, create_engine
+from app.core.database import DatabaseManager, RoleEnum, engine
+from app.core.models import User, Equipment, Product, ProductEquipment, Workshop
+from sqlalchemy import Column, Integer, String, text
 from sqlalchemy.ext.declarative import declarative_base
 
 # Создаем базовую модель для справочников
@@ -40,11 +43,11 @@ class Seal(DictBase):
 # Инициализация справочников при первом запуске
 def init_dictionaries():
     """Создает таблицы справочников, если их нет"""
-    try:
-        from database import engine
-        # Используем тот же engine, что и основное приложение
-        # Создаем таблицы через SQL напрямую, если их нет
-        with engine.connect() as conn:
+        try:
+            from app.core.database import engine
+            # Используем тот же engine, что и основное приложение
+            # Создаем таблицы через SQL напрямую, если их нет
+            with engine.connect() as conn:
             # Проверяем и создаем таблицы
             for table_name, table_class in [('mass_names', MassName), ('volumes', Volume), 
                                            ('containers', Container), ('seals', Seal)]:
@@ -57,12 +60,12 @@ def init_dictionaries():
                 except Exception:
                     pass
         DictBase.metadata.create_all(engine, checkfirst=True)
-    except Exception as e:
-        print(f"Ошибка при создании справочников: {e}")
-        # Пробуем создать через SQL
-        try:
-            from database import engine
-            from sqlalchemy import text
+        except Exception as e:
+            print(f"Ошибка при создании справочников: {e}")
+            # Пробуем создать через SQL
+            try:
+                from app.core.database import engine
+                from sqlalchemy import text
             with engine.connect() as conn:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS mass_names (

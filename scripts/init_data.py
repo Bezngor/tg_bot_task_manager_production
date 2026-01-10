@@ -1,7 +1,11 @@
 """
 Скрипт для инициализации базы данных и создания тестовых данных
 """
-from database import init_db, init_sample_data
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from app.core.database import init_db, init_sample_data
 
 if __name__ == '__main__':
     print("Инициализация базы данных...")

@@ -11,10 +11,10 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from config import TELEGRAM_BOT_TOKEN, Roles, Shifts
-from database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
-from models import User
-from utils import logger, generate_csv_report, generate_pdf_report
+from app.core.config import TELEGRAM_BOT_TOKEN, Roles, Shifts
+from app.core.database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
+from app.core.models import User
+from app.core.utils import logger, generate_csv_report, generate_pdf_report
 
 # Состояния для ConversationHandler
 SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
@@ -636,7 +636,7 @@ def main():
         return
     
     # Инициализация БД
-    from database import init_db, init_sample_data
+    from app.core.database import init_db, init_sample_data
     init_db()
     # Раскомментируйте следующую строку для создания тестовых данных
     # init_sample_data()

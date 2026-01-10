@@ -4,10 +4,10 @@ REST API для работы с системой управления задан
 from flask import Flask, jsonify, request
 from flask_restx import Api, Resource, fields, Namespace
 from datetime import datetime, date
-from database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
-from models import User, Task, Equipment, Product
-from config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
-from utils import logger, generate_csv_report, generate_pdf_report
+from app.core.database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
+from app.core.models import User, Task, Equipment, Product
+from app.core.config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG
+from app.core.utils import logger, generate_csv_report, generate_pdf_report
 
 app = Flask(__name__)
 api = Api(
@@ -416,7 +416,7 @@ def health_check():
 
 if __name__ == '__main__':
     # Инициализация БД при запуске API
-    from database import init_db
+    from app.core.database import init_db
     init_db()
     
     logger.info(f"Запуск Flask API на {FLASK_HOST}:{FLASK_PORT}")

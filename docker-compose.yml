@@ -13,7 +13,7 @@ services:
       - ./logs:/app/logs
       - ./reports:/app/reports
       - ./task_manager.db:/app/task_manager.db
-    command: python bot.py
+    command: python -m app.bot.bot
     depends_on:
       - api
 
@@ -31,7 +31,7 @@ services:
       - ./logs:/app/logs
       - ./reports:/app/reports
       - ./task_manager.db:/app/task_manager.db
-    command: python api.py
+    command: python -m app.api.api
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5050/health"]
       interval: 30s

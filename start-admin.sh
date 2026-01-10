@@ -14,14 +14,14 @@ echo "Запуск админ-панели..."
 docker run -d \
     --name "$CONTAINER_NAME" \
     -p 5051:5051 \
-    -v "$SCRIPT_DIR/admin_panel.py:/app/admin_panel.py" \
+    -v "$SCRIPT_DIR/app:/app/app" \
     -v "$SCRIPT_DIR/task_manager.db:/app/task_manager.db" \
     -v "$SCRIPT_DIR/data:/app/data" \
     -v "$SCRIPT_DIR/logs:/app/logs" \
     -v "$SCRIPT_DIR/reports:/app/reports" \
     -e DATABASE_URL="sqlite:///task_manager.db" \
     "$IMAGE" \
-    python admin_panel.py
+    python -m app.admin.admin_panel
 
 if [ $? -eq 0 ]; then
     echo "Админ-панель запущена!"

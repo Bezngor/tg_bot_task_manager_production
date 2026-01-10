@@ -36,7 +36,7 @@ docker run -d \
     -v "$SCRIPT_DIR/logs:/app/logs" \
     -v "$SCRIPT_DIR/reports:/app/reports" \
     "$IMAGE" \
-    python bot.py
+    python -m app.bot.bot
 
 # Применяем исправления к bot.py
 echo "Применение исправлений к bot.py..."
