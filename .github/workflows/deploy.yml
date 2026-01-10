@@ -198,25 +198,100 @@ jobs:
             done
             
             # Проверяем и принудительно освобождаем порты, если они заняты
-            echo "Checking port 5051..."
-            PORT_5051_IN_USE=false
-            if command -v lsof >/dev/null 2>&1 && lsof -ti:5051 >/dev/null 2>&1; then
-              PORT_5051_IN_USE=true
-            elif command -v ss >/dev/null 2>&1 && ss -tuln 2>/dev/null | grep -q ":5051 "; then
-              PORT_5051_IN_USE=true
-            elif command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":5051 "; then
-              PORT_5051_IN_USE=true
-            fi
+            echo "Checking and freeing port 5051..."
             
-            if [ "\$PORT_5051_IN_USE" = "true" ]; then
-              echo "Port 5051 is still in use. Attempting to free it..."
+            # Функция для освобождения порта
+            free_port_5051() {
+              echo "Attempting to free port 5051..."
+              
+              # 1. Проверяем Docker контейнеры, использующие порт 5051
+              # Ищем все контейнеры и проверяем их порты
+              CONTAINERS=\$(docker ps -a --format "{{.ID}}|{{.Names}}|{{.Ports}}" 2>/dev/null | grep ":5051" || true)
+              if [ -n "\$CONTAINERS" ]; then
+                echo "\$CONTAINERS" | while IFS='|' read -r cid name ports; do
+                  echo "Found Docker container using port 5051: \$name (\$cid)"
+                  docker stop \$cid 2>/dev/null || true
+                  docker rm -f \$cid 2>/dev/null || true
+                done
+                sleep 2
+              fi
+              
+              # Дополнительно проверяем конкретные контейнеры по именам
+              for container in tg_bot_task_manager_admin; do
+                if docker ps -a -q -f name=^/\${container}\$ 2>/dev/null | grep -q .; then
+                  echo "Stopping and removing container: \${container}"
+                  docker stop \${container} 2>/dev/null || true
+                  docker rm -f \${container} 2>/dev/null || true
+                fi
+              done
+              
+              # 2. Ищем процессы, использующие порт 5051
               if command -v lsof >/dev/null 2>&1; then
-                PID=\$(lsof -ti:5051 2>/dev/null | head -1)
-                if [ -n "\$PID" ]; then
-                  kill -9 \$PID 2>/dev/null || true
+                PIDS=\$(lsof -ti:5051 2>/dev/null || true)
+                if [ -n "\$PIDS" ]; then
+                  echo "Found processes using port 5051: \$PIDS"
+                  for PID in \$PIDS; do
+                    echo "Killing process \$PID..."
+                    kill -9 \$PID 2>/dev/null || true
+                  done
+                  sleep 2
+                fi
+              elif command -v fuser >/dev/null 2>&1; then
+                fuser -k 5051/tcp 2>/dev/null || true
+                sleep 2
+              fi
+              
+              # 3. Проверяем через ss или netstat для диагностики
+              if command -v ss >/dev/null 2>&1; then
+                SS_OUTPUT=\$(ss -tlnp 2>/dev/null | grep ":5051 " || true)
+                if [ -n "\$SS_OUTPUT" ]; then
+                  echo "Port 5051 still in use according to ss: \$SS_OUTPUT"
+                fi
+              elif command -v netstat >/dev/null 2>&1; then
+                NETSTAT_OUTPUT=\$(netstat -tlnp 2>/dev/null | grep ":5051 " || true)
+                if [ -n "\$NETSTAT_OUTPUT" ]; then
+                  echo "Port 5051 still in use according to netstat: \$NETSTAT_OUTPUT"
                 fi
               fi
-              sleep 2
+              
+              # 4. Очищаем Docker сети для освобождения портов
+              docker network prune -f 2>/dev/null || true
+            }
+            
+            # Проверяем, занят ли порт
+            PORT_IN_USE=false
+            if command -v lsof >/dev/null 2>&1 && lsof -ti:5051 >/dev/null 2>&1; then
+              PORT_IN_USE=true
+            elif command -v ss >/dev/null 2>&1 && ss -tuln 2>/dev/null | grep -q ":5051 "; then
+              PORT_IN_USE=true
+            elif command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":5051 "; then
+              PORT_IN_USE=true
+            fi
+            
+            # Проверяем Docker контейнеры, использующие порт 5051
+            DOCKER_CONTAINERS=\$(docker ps -a --format "{{.Ports}}" 2>/dev/null | grep ":5051" || true)
+            if [ -n "\$DOCKER_CONTAINERS" ]; then
+              PORT_IN_USE=true
+              echo "Found Docker containers using port 5051"
+            fi
+            
+            # Проверяем конкретный контейнер админ-панели
+            if docker ps -a -q -f name=^/tg_bot_task_manager_admin\$ 2>/dev/null | grep -q .; then
+              PORT_IN_USE=true
+              echo "Admin panel container exists"
+            fi
+            
+            if [ "\$PORT_IN_USE" = "true" ]; then
+              free_port_5051
+              # Повторная проверка после освобождения
+              sleep 3
+              if command -v lsof >/dev/null 2>&1 && lsof -ti:5051 >/dev/null 2>&1; then
+                echo "⚠️  Port 5051 is still in use after cleanup attempt"
+                free_port_5051
+                sleep 3
+              fi
+            else
+              echo "✅ Port 5051 is free"
             fi
             
             echo "Port check completed. Proceeding with deployment..."
@@ -289,29 +364,55 @@ jobs:
               -v \$DEPLOY_DIR/logs:/app/logs \
               -v \$DEPLOY_DIR/reports:/app/reports \
               -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
-              \$ACTUAL_IMAGE python -m app.admin.admin_panel; then
-              echo "❌ Failed to start admin panel container. Checking port 5051..."
-              docker ps -a | grep tg_bot_task_manager_admin || true
-              # Проверяем, что использует порт 5051
-              if command -v lsof >/dev/null 2>&1; then
-                lsof -i:5051 2>/dev/null || true
-              elif command -v ss >/dev/null 2>&1; then
-                ss -tuln 2>/dev/null | grep ":5051 " || true
-              elif command -v netstat >/dev/null 2>&1; then
-                netstat -tuln 2>/dev/null | grep ":5051 " || true
-              fi
-              echo "Attempting to fix and retry..."
-              # Попытка принудительно освободить порт
-              if command -v lsof >/dev/null 2>&1; then
-                PID=\$(lsof -ti:5051 2>/dev/null | head -1)
-                if [ -n "\$PID" ]; then
-                  kill -9 \$PID 2>/dev/null || true
-                fi
-              fi
-              sleep 2
+              \$ACTUAL_IMAGE python -m app.admin.admin_panel 2>&1; then
+              echo "❌ Failed to start admin panel container. Attempting aggressive cleanup..."
+              
+              # Удаляем созданный контейнер (если он был создан, но не запустился)
               docker rm -f tg_bot_task_manager_admin 2>/dev/null || true
-              # Повторная попытка запуска
-              docker run -d \
+              
+              # Агрессивное освобождение порта 5051
+              echo "Freeing port 5051 aggressively..."
+              
+              # 1. Останавливаем и удаляем все контейнеры, использующие порт
+              CONTAINERS=\$(docker ps -a --filter "publish=5051" -q 2>/dev/null || true)
+              if [ -n "\$CONTAINERS" ]; then
+                echo "Stopping containers using port 5051: \$CONTAINERS"
+                echo "\$CONTAINERS" | while read -r cid; do
+                  docker stop \$cid 2>/dev/null || true
+                  docker rm -f \$cid 2>/dev/null || true
+                done
+              fi
+              
+              # 2. Убиваем все процессы, использующие порт
+              if command -v lsof >/dev/null 2>&1; then
+                PIDS=\$(lsof -ti:5051 2>/dev/null || true)
+                if [ -n "\$PIDS" ]; then
+                  echo "Killing processes using port 5051: \$PIDS"
+                  for pid in \$PIDS; do
+                    kill -9 \$pid 2>/dev/null || true
+                  done
+                fi
+              elif command -v fuser >/dev/null 2>&1; then
+                fuser -k 5051/tcp 2>/dev/null || true
+              fi
+              
+              sleep 3
+              
+              # 3. Проверяем, что порт свободен
+              echo "Checking if port 5051 is now free..."
+              if command -v lsof >/dev/null 2>&1 && lsof -ti:5051 >/dev/null 2>&1; then
+                echo "⚠️  Port 5051 is still in use. Trying alternative approach..."
+                # Попытка использовать другой порт временно или принудительно освободить
+                docker network prune -f 2>/dev/null || true
+                sleep 2
+              fi
+              
+              # 4. Повторная попытка запуска
+              echo "Retrying admin panel container startup..."
+              docker rm -f tg_bot_task_manager_admin 2>/dev/null || true
+              sleep 1
+              
+              if ! docker run -d \
                 --name tg_bot_task_manager_admin \
                 --restart unless-stopped \
                 \$ENV_FILE_OPTION \
@@ -320,10 +421,17 @@ jobs:
                 -v \$DEPLOY_DIR/logs:/app/logs \
                 -v \$DEPLOY_DIR/reports:/app/reports \
                 -v \$DEPLOY_DIR/task_manager.db:/app/task_manager.db \
-                \$ACTUAL_IMAGE python -m app.admin.admin_panel || {
-                  echo "❌ Failed to start admin panel container after retry"
-                  exit 1
-                }
+                \$ACTUAL_IMAGE python -m app.admin.admin_panel; then
+                echo "❌ Failed to start admin panel container after retry"
+                echo "Diagnostic information:"
+                docker ps -a | grep admin || true
+                if command -v lsof >/dev/null 2>&1; then
+                  echo "Processes using port 5051:"
+                  lsof -i:5051 2>/dev/null || echo "No processes found (or lsof unavailable)"
+                fi
+                docker logs tg_bot_task_manager_admin 2>/dev/null | tail -30 || true
+                exit 1
+              fi
             fi
             
             # Ждем немного и проверяем статус контейнеров
