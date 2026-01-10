@@ -27,6 +27,11 @@ FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', 5050))
 FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
+# Admin Panel
+ADMIN_HOST = os.getenv('ADMIN_HOST', '0.0.0.0')
+ADMIN_PORT = int(os.getenv('ADMIN_PORT', 5051))
+ADMIN_DEBUG = os.getenv('ADMIN_DEBUG', 'False').lower() == 'true'
+
 # Logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = os.getenv('LOG_FILE', 'bot.log')

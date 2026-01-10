@@ -38,3 +38,21 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  admin:
+    build: .
+    container_name: tg_bot_task_manager_admin
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5051:5051"
+    volumes:
+      # Монтируем директории для сохранения данных
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./task_manager.db:/app/task_manager.db
+    command: python -m app.admin.admin_panel
+    depends_on:
+      - api

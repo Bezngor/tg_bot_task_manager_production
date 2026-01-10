@@ -14,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from app.core.database import DatabaseManager, RoleEnum, engine
 from app.core.models import User, Equipment, Product, ProductEquipment, Workshop
+from app.core.config import ADMIN_HOST, ADMIN_PORT, ADMIN_DEBUG
 from sqlalchemy import Column, Integer, String, text
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -43,11 +44,11 @@ class Seal(DictBase):
 # Инициализация справочников при первом запуске
 def init_dictionaries():
     """Создает таблицы справочников, если их нет"""
-        try:
-            from app.core.database import engine
-            # Используем тот же engine, что и основное приложение
-            # Создаем таблицы через SQL напрямую, если их нет
-            with engine.connect() as conn:
+    try:
+        from app.core.database import engine
+        # Используем тот же engine, что и основное приложение
+        # Создаем таблицы через SQL напрямую, если их нет
+        with engine.connect() as conn:
             # Проверяем и создаем таблицы
             for table_name, table_class in [('mass_names', MassName), ('volumes', Volume), 
                                            ('containers', Container), ('seals', Seal)]:
@@ -60,12 +61,12 @@ def init_dictionaries():
                 except Exception:
                     pass
         DictBase.metadata.create_all(engine, checkfirst=True)
-        except Exception as e:
-            print(f"Ошибка при создании справочников: {e}")
-            # Пробуем создать через SQL
-            try:
-                from app.core.database import engine
-                from sqlalchemy import text
+    except Exception as e:
+        print(f"Ошибка при создании справочников: {e}")
+        # Пробуем создать через SQL
+        try:
+            from app.core.database import engine
+            from sqlalchemy import text
             with engine.connect() as conn:
                 conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS mass_names (
@@ -1763,4 +1764,4 @@ def delete_seal(item_id):
     return redirect(url_for('seals_list'))
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5051, debug=True)
+    app.run(host=ADMIN_HOST, port=ADMIN_PORT, debug=ADMIN_DEBUG)
