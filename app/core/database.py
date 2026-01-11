@@ -169,11 +169,26 @@ class DatabaseManager:
             query = query.filter(Task.status == status)
         return query.order_by(Task.task_date.desc()).all()
     
-    def get_tasks_by_manager(self, manager_id: int, status: TaskStatusEnum = None):
-        """Получить задания начальника"""
+    def get_tasks_by_manager(self, manager_id: int, status: TaskStatusEnum = None, date_from=None, date_to=None):
+        """Получить задания начальника
+        
+        Args:
+            manager_id: ID начальника
+            status: фильтр по статусу (опционально)
+            date_from: дата начала периода (date, включительно)
+            date_to: дата окончания периода (date, включительно)
+        """
         query = self.db.query(Task).filter(Task.manager_id == manager_id)
         if status:
             query = query.filter(Task.status == status)
+        if date_from:
+            # Фильтруем по дате (включая начало дня)
+            date_from_dt = datetime.combine(date_from, datetime.min.time())
+            query = query.filter(Task.task_date >= date_from_dt)
+        if date_to:
+            # Фильтруем по дате (включая конец дня)
+            date_to_dt = datetime.combine(date_to, datetime.max.time())
+            query = query.filter(Task.task_date <= date_to_dt)
         return query.order_by(Task.task_date.desc()).all()
     
     def update_task_status(self, task_id: int, status: TaskStatusEnum):

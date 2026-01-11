@@ -24,13 +24,16 @@ from telegram.error import Conflict, NetworkError, TimedOut
 from app.core.config import TELEGRAM_BOT_TOKEN, Roles, Shifts
 from app.core.database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
 from app.core.models import User
-from app.core.utils import logger, generate_csv_report, generate_pdf_report
+from app.core.utils import logger, generate_csv_report, generate_pdf_report, get_period_dates, get_now_utc3
 
 # Состояния для ConversationHandler
 SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
 SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(6, 8)
 SELECTING_STATUS = 8  # Состояние для выбора статуса заданий
-SELECTING_REPORT_FORMAT = 9  # Состояние для выбора формата отчета
+SELECTING_REPORT_PERIOD = 9  # Состояние для выбора периода отчета
+SELECTING_REPORT_FORMAT = 10  # Состояние для выбора формата отчета
+ENTERING_REPORT_DATE_FROM = 11  # Состояние для ввода даты начала кастомного периода
+ENTERING_REPORT_DATE_TO = 12  # Состояние для ввода даты конца кастомного периода
 
 # Глобальные переменные для хранения данных при создании задания
 task_data = {}
@@ -727,7 +730,7 @@ async def enter_actual_quantity(update: Update, context: ContextTypes.DEFAULT_TY
 
 @role_required(['admin', 'manager'])
 async def generate_report_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало генерации отчета для начальника - выбор формата"""
+    """Начало генерации отчета для начальника - выбор периода"""
     user = update.effective_user
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user.id)
@@ -737,6 +740,159 @@ async def generate_report_start(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("📊 У вас нет заданий для отчета.")
             return ConversationHandler.END
         
+        # Показываем клавиатуру для выбора периода
+        from app.core.utils import get_yesterday_utc3, get_period_dates
+        
+        yesterday = get_yesterday_utc3()
+        week_start, week_end = get_period_dates('week')
+        month_start, month_end = get_period_dates('month')
+        
+        keyboard = [
+            [InlineKeyboardButton(f"📅 Вчера ({yesterday.strftime('%d.%m.%Y')})", callback_data="report_period_yesterday")],
+            [InlineKeyboardButton(f"📆 Неделя ({week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m.%Y')})", callback_data="report_period_week")],
+            [InlineKeyboardButton(f"📅 Месяц ({month_start.strftime('%d.%m')} - {month_end.strftime('%d.%m.%Y')})", callback_data="report_period_month")],
+            [InlineKeyboardButton("📆 Выбрать свой период", callback_data="report_period_custom")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="report_period_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📊 Выберите период для отчета:",
+            reply_markup=reply_markup
+        )
+        return SELECTING_REPORT_PERIOD
+
+
+@role_required(['admin', 'manager'])
+async def select_report_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор формата отчета после выбора периода"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "report_period_cancel":
+        await query.edit_message_text("❌ Генерация отчета отменена.")
+        return ConversationHandler.END
+    
+    if query.data == "report_period_custom":
+        # Запрашиваем дату начала кастомного периода
+        await query.edit_message_text(
+            "📆 Выберите кастомный период\n\n"
+            "Введите дату начала периода в формате ДД.ММ.ГГГГ\n"
+            "Например: 01.01.2026"
+        )
+        return ENTERING_REPORT_DATE_FROM
+    
+    period_type = query.data.replace("report_period_", "")  # "yesterday", "week", "month"
+    
+    # Сохраняем выбранный период в контексте
+    context.user_data['report_period'] = period_type
+    
+    # Показываем клавиатуру для выбора формата
+    keyboard = [
+        [InlineKeyboardButton("📄 CSV формат", callback_data="report_format_csv")],
+        [InlineKeyboardButton("📑 PDF формат", callback_data="report_format_pdf")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="report_format_cancel")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        "📊 Выберите формат отчета:",
+        reply_markup=reply_markup
+    )
+    return SELECTING_REPORT_FORMAT
+
+
+@role_required(['admin', 'manager'])
+async def enter_report_date_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода даты начала кастомного периода"""
+    try:
+        from app.core.utils import get_yesterday_utc3
+        yesterday = get_yesterday_utc3()
+        
+        # Парсим дату в формате ДД.ММ.ГГГГ
+        date_str = update.message.text.strip()
+        try:
+            date_from = datetime.strptime(date_str, '%d.%m.%Y').date()
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ\n"
+                "Например: 01.01.2026\n\n"
+                "Введите дату начала периода:"
+            )
+            return ENTERING_REPORT_DATE_FROM
+        
+        # Проверяем, что дата не в будущем (не позже вчера)
+        if date_from > yesterday:
+            await update.message.reply_text(
+                f"❌ Дата начала не может быть позже вчера ({yesterday.strftime('%d.%m.%Y')})\n\n"
+                "Введите дату начала периода:"
+            )
+            return ENTERING_REPORT_DATE_FROM
+        
+        # Сохраняем дату начала и запрашиваем дату конца
+        context.user_data['report_date_from'] = date_from
+        await update.message.reply_text(
+            f"✅ Дата начала: {date_from.strftime('%d.%m.%Y')}\n\n"
+            "Введите дату конца периода в формате ДД.ММ.ГГГГ\n"
+            "Например: 10.01.2026"
+        )
+        return ENTERING_REPORT_DATE_TO
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки даты начала: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка обработки даты. Попробуйте еще раз.\n\n"
+            "Введите дату начала периода в формате ДД.ММ.ГГГГ:"
+        )
+        return ENTERING_REPORT_DATE_FROM
+
+
+@role_required(['admin', 'manager'])
+async def enter_report_date_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода даты конца кастомного периода"""
+    try:
+        from app.core.utils import get_yesterday_utc3
+        yesterday = get_yesterday_utc3()
+        
+        # Получаем дату начала из контекста
+        date_from = context.user_data.get('report_date_from')
+        if not date_from:
+            await update.message.reply_text("❌ Ошибка: дата начала не сохранена. Начните заново.")
+            context.user_data.pop('report_date_from', None)
+            return ConversationHandler.END
+        
+        # Парсим дату конца
+        date_str = update.message.text.strip()
+        try:
+            date_to = datetime.strptime(date_str, '%d.%m.%Y').date()
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ\n"
+                "Например: 10.01.2026\n\n"
+                "Введите дату конца периода:"
+            )
+            return ENTERING_REPORT_DATE_TO
+        
+        # Проверяем, что дата не в будущем
+        if date_to > yesterday:
+            await update.message.reply_text(
+                f"❌ Дата конца не может быть позже вчера ({yesterday.strftime('%d.%m.%Y')})\n\n"
+                "Введите дату конца периода:"
+            )
+            return ENTERING_REPORT_DATE_TO
+        
+        # Проверяем, что дата конца не раньше даты начала
+        if date_to < date_from:
+            await update.message.reply_text(
+                f"❌ Дата конца ({date_to.strftime('%d.%m.%Y')}) не может быть раньше даты начала ({date_from.strftime('%d.%m.%Y')})\n\n"
+                "Введите дату конца периода:"
+            )
+            return ENTERING_REPORT_DATE_TO
+        
+        # Сохраняем даты в контексте как кастомный период
+        context.user_data['report_period'] = 'custom'
+        context.user_data['report_date_to'] = date_to
+        
         # Показываем клавиатуру для выбора формата
         keyboard = [
             [InlineKeyboardButton("📄 CSV формат", callback_data="report_format_csv")],
@@ -744,12 +900,25 @@ async def generate_report_start(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("❌ Отмена", callback_data="report_format_cancel")]
         ]
         
+        period_text = date_from.strftime('%d.%m.%Y')
+        if date_from != date_to:
+            period_text = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
+            f"✅ Период выбран: {period_text}\n\n"
             "📊 Выберите формат отчета:",
             reply_markup=reply_markup
         )
         return SELECTING_REPORT_FORMAT
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки даты конца: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка обработки даты. Попробуйте еще раз.\n\n"
+            "Введите дату конца периода в формате ДД.ММ.ГГГГ:"
+        )
+        return ENTERING_REPORT_DATE_TO
 
 
 @role_required(['admin', 'manager'])
@@ -760,42 +929,91 @@ async def generate_and_send_report(update: Update, context: ContextTypes.DEFAULT
     
     if query.data == "report_format_cancel":
         await query.edit_message_text("❌ Генерация отчета отменена.")
+        context.user_data.pop('report_period', None)
+        context.user_data.pop('report_date_from', None)
+        context.user_data.pop('report_date_to', None)
         return ConversationHandler.END
     
     user = update.effective_user
     format_type = query.data.replace("report_format_", "")  # "csv" или "pdf"
+    period_type = context.user_data.get('report_period', 'yesterday')
+    
+    # Получаем даты периода
+    try:
+        if period_type == 'custom':
+            # Используем сохраненные даты из контекста
+            period_from = context.user_data.get('report_date_from')
+            period_to = context.user_data.get('report_date_to')
+            if not period_from or not period_to:
+                await query.edit_message_text("❌ Ошибка: даты периода не сохранены. Начните заново.")
+                context.user_data.pop('report_period', None)
+                context.user_data.pop('report_date_from', None)
+                context.user_data.pop('report_date_to', None)
+                return ConversationHandler.END
+        else:
+            period_from, period_to = get_period_dates(period_type)
+    except ValueError as e:
+        await query.edit_message_text(f"❌ Ошибка определения периода: {str(e)}")
+        context.user_data.pop('report_period', None)
+        context.user_data.pop('report_date_from', None)
+        context.user_data.pop('report_date_to', None)
+        return ConversationHandler.END
     
     # Показываем сообщение о начале генерации
-    await query.edit_message_text("⏳ Генерирую отчет... Пожалуйста, подождите.")
+    period_names = {
+        'yesterday': 'Вчера',
+        'week': 'Неделя',
+        'month': 'Месяц'
+    }
+    period_name = period_names.get(period_type, period_type)
+    await query.edit_message_text(f"⏳ Генерирую отчет за период '{period_name}'... Пожалуйста, подождите.")
     
     try:
         with DatabaseManager() as db:
             manager = db.get_user_by_telegram_id(user.id)
             if not manager:
                 await query.edit_message_text("❌ Пользователь не найден.")
+                context.user_data.pop('report_period', None)
                 return ConversationHandler.END
             
-            tasks = db.get_tasks_by_manager(manager.id)
+            # Получаем задания за выбранный период
+            tasks = db.get_tasks_by_manager(manager.id, date_from=period_from, date_to=period_to)
             
             if not tasks:
-                await query.edit_message_text("📊 У вас нет заданий для отчета.")
+                period_text = period_from.strftime('%d.%m.%Y')
+                if period_from != period_to:
+                    period_text = f"{period_from.strftime('%d.%m.%Y')} - {period_to.strftime('%d.%m.%Y')}"
+                await query.edit_message_text(f"📊 У вас нет заданий за период {period_text}.")
+                context.user_data.pop('report_period', None)
                 return ConversationHandler.END
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = get_now_utc3().strftime("%Y%m%d_%H%M%S")
+            report_time = get_now_utc3().strftime('%d.%m.%Y %H:%M')
+            
+            # Формируем название периода для заголовка
+            if period_from == period_to:
+                period_title = period_from.strftime('%d.%m.%Y')
+            else:
+                period_title = f"{period_from.strftime('%d.%m.%Y')} - {period_to.strftime('%d.%m.%Y')}"
             
             # Генерируем отчет выбранного формата
             if format_type == "pdf":
                 file_path = generate_pdf_report(
                     tasks, 
-                    f'reports/report_manager_{manager.id}_{timestamp}.pdf'
+                    f'reports/report_manager_{manager.id}_{timestamp}.pdf',
+                    title='Отчет по заданиям',
+                    period_from=period_from,
+                    period_to=period_to
                 )
-                file_caption = f"📑 Отчет по заданиям (PDF)\n\nВсего заданий: {len(tasks)}\nСгенерировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                file_caption = f"📑 Отчет по заданиям (PDF)\n\nПериод: {period_title}\nВсего заданий: {len(tasks)}\nСгенерировано: {report_time}"
             else:  # csv
                 file_path = generate_csv_report(
                     tasks,
-                    f'reports/report_manager_{manager.id}_{timestamp}.csv'
+                    f'reports/report_manager_{manager.id}_{timestamp}.csv',
+                    period_from=period_from,
+                    period_to=period_to
                 )
-                file_caption = f"📄 Отчет по заданиям (CSV)\n\nВсего заданий: {len(tasks)}\nСгенерировано: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                file_caption = f"📄 Отчет по заданиям (CSV)\n\nПериод: {period_title}\nВсего заданий: {len(tasks)}\nСгенерировано: {report_time}"
             
             # Отправляем файл пользователю
             try:
@@ -807,24 +1025,38 @@ async def generate_and_send_report(update: Update, context: ContextTypes.DEFAULT
                         filename=os.path.basename(file_path)
                     )
                 
+                period_text = period_from.strftime('%d.%m.%Y')
+                if period_from != period_to:
+                    period_text = f"{period_from.strftime('%d.%m.%Y')} - {period_to.strftime('%d.%m.%Y')}"
+                
                 await query.edit_message_text(
                     f"✅ Отчет успешно сгенерирован и отправлен!\n\n"
+                    f"Период: {period_text}\n"
                     f"Формат: {format_type.upper()}\n"
                     f"Заданий в отчете: {len(tasks)}\n\n"
                     f"💾 Файл доступен в ваших загрузках Telegram."
                 )
                 logger.info(f"Отчет {file_path} отправлен пользователю {user.id}")
+                context.user_data.pop('report_period', None)
+                context.user_data.pop('report_date_from', None)
+                context.user_data.pop('report_date_to', None)
             except Exception as e:
                 logger.error(f"Ошибка отправки файла отчета: {e}")
                 await query.edit_message_text(
                     f"❌ Ошибка при отправке файла: {str(e)}\n\n"
                     f"Файл сгенерирован по пути: {file_path}"
                 )
+                context.user_data.pop('report_period', None)
+                context.user_data.pop('report_date_from', None)
+                context.user_data.pop('report_date_to', None)
         
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Ошибка генерации отчета: {e}", exc_info=e)
         await query.edit_message_text(f"❌ Ошибка при генерации отчета: {str(e)}")
+        context.user_data.pop('report_period', None)
+        context.user_data.pop('report_date_from', None)
+        context.user_data.pop('report_date_to', None)
         return ConversationHandler.END
 
 
@@ -854,6 +1086,11 @@ async def show_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена текущей операции"""
     task_data.pop(update.effective_user.id, None)
+    # Очищаем данные отчета, если они есть
+    context.user_data.pop('report_period', None)
+    context.user_data.pop('report_date_from', None)
+    context.user_data.pop('report_date_to', None)
+    # Очищаем остальные данные
     context.user_data.clear()
     await update.message.reply_text("❌ Операция отменена.")
     return ConversationHandler.END
@@ -969,10 +1206,13 @@ def main():
     )
     application.add_handler(report_handler)
     
-    # Обработчик генерации отчета с выбором формата
+    # Обработчик генерации отчета с выбором периода и формата
     report_generation_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📈 Отчет$"), generate_report_start)],
         states={
+            SELECTING_REPORT_PERIOD: [CallbackQueryHandler(select_report_format, pattern="^report_period_")],
+            ENTERING_REPORT_DATE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_report_date_from)],
+            ENTERING_REPORT_DATE_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_report_date_to)],
             SELECTING_REPORT_FORMAT: [CallbackQueryHandler(generate_and_send_report, pattern="^report_format_")],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],

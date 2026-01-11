@@ -3,9 +3,26 @@
 """
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, date, timedelta, timezone, timedelta as td
 from pathlib import Path
 from cryptography.fernet import Fernet
+
+# Попытка использовать zoneinfo (Python 3.9+), иначе pytz
+try:
+    from zoneinfo import ZoneInfo
+    try:
+        TIMEZONE = ZoneInfo("Europe/Moscow")
+    except Exception:
+        # Если zoneinfo не может загрузить tzdata, пробуем pytz
+        import pytz
+        TIMEZONE = pytz.timezone("Europe/Moscow")
+except (ImportError, ModuleNotFoundError):
+    try:
+        import pytz
+        TIMEZONE = pytz.timezone("Europe/Moscow")
+    except ImportError:
+        # Fallback: используем UTC+3 через timedelta
+        TIMEZONE = timezone(td(hours=3))
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -15,6 +32,61 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import pandas as pd
 from .config import ENCRYPTION_KEY
+
+def get_now_utc3() -> datetime:
+    """Получить текущее время в UTC+3"""
+    try:
+        if hasattr(TIMEZONE, 'localize'):
+            # pytz
+            return TIMEZONE.localize(datetime.now())
+        else:
+            # zoneinfo или timezone
+            return datetime.now(TIMEZONE)
+    except Exception:
+        # Fallback: используем UTC+3 через timedelta
+        return datetime.now(timezone(td(hours=3)))
+
+def get_today_utc3() -> date:
+    """Получить текущую дату в UTC+3"""
+    return get_now_utc3().date()
+
+def get_yesterday_utc3() -> date:
+    """Получить вчерашнюю дату в UTC+3"""
+    return get_today_utc3() - timedelta(days=1)
+
+def get_period_dates(period_type: str) -> tuple[date, date]:
+    """
+    Получить даты начала и конца периода
+    
+    Args:
+        period_type: 'yesterday', 'week', 'month'
+    
+    Returns:
+        tuple: (date_from, date_to) - обе даты включительно
+    """
+    today = get_today_utc3()
+    yesterday = get_yesterday_utc3()
+    
+    if period_type == 'yesterday':
+        # Вчера - от начала вчерашнего дня до конца вчерашнего дня (обе смены)
+        return yesterday, yesterday
+    
+    elif period_type == 'week':
+        # Неделя - с понедельника текущей недели до вчера включительно
+        # Понедельник - это день недели 0 в Python (weekday())
+        current_weekday = today.weekday()
+        # Находим понедельник текущей недели
+        days_from_monday = current_weekday  # 0 для понедельника, 6 для воскресенья
+        week_start = today - timedelta(days=days_from_monday)
+        return week_start, yesterday
+    
+    elif period_type == 'month':
+        # Месяц - с 1-го числа текущего месяца до вчера включительно
+        month_start = date(today.year, today.month, 1)
+        return month_start, yesterday
+    
+    else:
+        raise ValueError(f"Неизвестный тип периода: {period_type}")
 
 # Настройка логирования
 def setup_logging(log_file='bot.log', log_level=logging.INFO):
@@ -90,13 +162,15 @@ class DataEncryptor:
             raise
 
 
-def generate_csv_report(tasks, output_path='reports/report.csv'):
+def generate_csv_report(tasks, output_path='reports/report.csv', period_from=None, period_to=None):
     """
     Генерация отчета в формате CSV
     
     Args:
         tasks: список заданий (объекты Task или словари)
         output_path: путь для сохранения отчета
+        period_from: дата начала периода (date)
+        period_to: дата окончания периода (date)
     """
     # Если путь относительный, создаем его относительно корня проекта
     report_path = Path(output_path)
@@ -112,24 +186,39 @@ def generate_csv_report(tasks, output_path='reports/report.csv'):
     for task in tasks:
         if hasattr(task, '__dict__'):
             # SQLAlchemy объект
+            planned = task.planned_quantity or 0
+            actual = task.actual_quantity or 0
+            delta = actual - planned
+            
             row = {
-                'ID задания': task.id,
-                'Дата задания': task.task_date.strftime('%Y-%m-%d') if task.task_date else '',
-                'Смена': '1-я (8:00-20:00)' if task.shift.value == 1 else '2-я (20:00-8:00)',
-                'Начальник': task.manager.full_name if task.manager else f"ID: {task.manager_id}",
+                'ID': task.id,
+                'Дата': task.task_date.strftime('%d.%m.%Y') if task.task_date else '',
+                'Смена': '1-я' if task.shift.value == 1 else '2-я',
                 'Сотрудник': task.employee.full_name if task.employee else f"ID: {task.employee_id}",
                 'Оборудование': task.equipment.name if task.equipment else f"ID: {task.equipment_id}",
                 'Продукция': task.product.name if task.product else f"ID: {task.product_id}",
-                'План, шт': task.planned_quantity,
-                'Факт, шт': task.actual_quantity,
+                'План': planned,
+                'Факт': actual,
+                'Дельта': delta,
                 'Статус': task.status.value,
-                'Создано': task.created_at.strftime('%Y-%m-%d %H:%M:%S') if task.created_at else '',
-                'Получено': task.received_at.strftime('%Y-%m-%d %H:%M:%S') if task.received_at else '',
-                'Завершено': task.completed_at.strftime('%Y-%m-%d %H:%M:%S') if task.completed_at else '',
             }
         else:
             # Словарь
-            row = task
+            planned = task.get('planned_quantity', 0) or 0
+            actual = task.get('actual_quantity', 0) or 0
+            delta = actual - planned
+            row = {
+                'ID': task.get('id', ''),
+                'Дата': task.get('task_date', ''),
+                'Смена': task.get('shift', ''),
+                'Сотрудник': task.get('employee', ''),
+                'Оборудование': task.get('equipment', ''),
+                'Продукция': task.get('product', ''),
+                'План': planned,
+                'Факт': actual,
+                'Дельта': delta,
+                'Статус': task.get('status', ''),
+            }
         
         data.append(row)
     
@@ -228,7 +317,7 @@ def _register_cyrillic_font():
     return regular_font, (bold_font or regular_font)
 
 
-def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отчет по заданиям'):
+def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отчет по заданиям', period_from=None, period_to=None):
     """
     Генерация отчета в формате PDF
     
@@ -236,6 +325,8 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
         tasks: список заданий (объекты Task или словари)
         output_path: путь для сохранения отчета
         title: заголовок отчета
+        period_from: дата начала периода (date)
+        period_to: дата окончания периода (date)
     """
     # Если путь относительный, создаем его относительно корня проекта
     report_path = Path(output_path)
@@ -296,9 +387,9 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
         alignment=1  # Center
     )
     story.append(Paragraph(escape_html(title), title_style))
-    story.append(Spacer(1, 0.5*cm))
+    story.append(Spacer(1, 0.3*cm))
     
-    # Дата генерации
+    # Период отчета и дата генерации
     date_style = ParagraphStyle(
         'DateStyle',
         parent=styles['Normal'],
@@ -307,16 +398,33 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
         textColor=colors.grey,
         alignment=1
     )
-    story.append(Paragraph(escape_html(f"Сформировано: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"), date_style))
+    
+    period_text = ""
+    if period_from and period_to:
+        if period_from == period_to:
+            period_text = f"Период: {period_from.strftime('%d.%m.%Y')}"
+        else:
+            period_text = f"Период: {period_from.strftime('%d.%m.%Y')} - {period_to.strftime('%d.%m.%Y')}"
+    
+    report_time = get_now_utc3().strftime('%d.%m.%Y %H:%M')
+    
+    if period_text:
+        story.append(Paragraph(escape_html(period_text), date_style))
+        story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(escape_html(f"Сформировано: {report_time}"), date_style))
     story.append(Spacer(1, 1*cm))
     
     # Подготовка данных для таблицы
     # Заголовки таблицы
-    headers = ['ID', 'Дата', 'Смена', 'Сотрудник', 'Оборудование', 'Продукция', 'План', 'Факт', 'Статус']
+    headers = ['ID', 'Дата', 'Смена', 'Сотрудник', 'Оборудование', 'Продукция', 'План', 'Факт', 'Дельта', 'Статус']
     table_data = [[Paragraph(escape_html(header), header_style) for header in headers]]
     
     for task in tasks:
         if hasattr(task, '__dict__'):
+            planned = task.planned_quantity or 0
+            actual = task.actual_quantity or 0
+            delta = actual - planned
+            
             row = [
                 Paragraph(escape_html(str(task.id)), cell_style),
                 Paragraph(escape_html(task.task_date.strftime('%d.%m.%Y') if task.task_date else ''), cell_style),
@@ -324,11 +432,16 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
                 Paragraph(escape_html(task.employee.full_name if task.employee else f"ID:{task.employee_id}"), cell_style),
                 Paragraph(escape_html(task.equipment.name if task.equipment else f"ID:{task.equipment_id}"), cell_style),
                 Paragraph(escape_html(task.product.name if task.product else f"ID:{task.product_id}"), cell_style),
-                Paragraph(escape_html(str(task.planned_quantity)), cell_style),
-                Paragraph(escape_html(str(task.actual_quantity)), cell_style),
+                Paragraph(escape_html(str(planned)), cell_style),
+                Paragraph(escape_html(str(actual)), cell_style),
+                Paragraph(escape_html(str(delta)), cell_style),
                 Paragraph(escape_html(task.status.value), cell_style)
             ]
         else:
+            planned = task.get('planned_quantity', 0) or 0
+            actual = task.get('actual_quantity', 0) or 0
+            delta = actual - planned
+            
             row = [
                 Paragraph(escape_html(str(task.get('id', ''))), cell_style),
                 Paragraph(escape_html(str(task.get('task_date', ''))), cell_style),
@@ -336,14 +449,15 @@ def generate_pdf_report(tasks, output_path='reports/report.pdf', title='Отче
                 Paragraph(escape_html(str(task.get('employee', ''))), cell_style),
                 Paragraph(escape_html(str(task.get('equipment', ''))), cell_style),
                 Paragraph(escape_html(str(task.get('product', ''))), cell_style),
-                Paragraph(escape_html(str(task.get('planned_quantity', ''))), cell_style),
-                Paragraph(escape_html(str(task.get('actual_quantity', ''))), cell_style),
+                Paragraph(escape_html(str(planned)), cell_style),
+                Paragraph(escape_html(str(actual)), cell_style),
+                Paragraph(escape_html(str(delta)), cell_style),
                 Paragraph(escape_html(str(task.get('status', ''))), cell_style)
             ]
         table_data.append(row)
     
-    # Создание таблицы
-    table = Table(table_data, colWidths=[1*cm, 2*cm, 1.5*cm, 3*cm, 2.5*cm, 2.5*cm, 1.5*cm, 1.5*cm, 1.5*cm])
+    # Создание таблицы (добавлена колонка Дельта)
+    table = Table(table_data, colWidths=[0.8*cm, 2*cm, 1.2*cm, 2.5*cm, 2.5*cm, 2.5*cm, 1.2*cm, 1.2*cm, 1.2*cm, 1.2*cm])
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4472C4')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
