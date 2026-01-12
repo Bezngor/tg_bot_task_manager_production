@@ -3,6 +3,7 @@
 """
 import logging
 import os
+import calendar
 from datetime import datetime, date, timedelta, timezone, timedelta as td
 from pathlib import Path
 from cryptography.fernet import Fernet
@@ -72,18 +73,45 @@ def get_period_dates(period_type: str) -> tuple[date, date]:
         return yesterday, yesterday
     
     elif period_type == 'week':
-        # Неделя - с понедельника текущей недели до вчера включительно
+        # Неделя - с понедельника текущей или прошлой недели до вчера включительно
         # Понедельник - это день недели 0 в Python (weekday())
-        current_weekday = today.weekday()
-        # Находим понедельник текущей недели
-        days_from_monday = current_weekday  # 0 для понедельника, 6 для воскресенья
-        week_start = today - timedelta(days=days_from_monday)
+        current_weekday = today.weekday()  # 0 = понедельник, 1 = вторник, ..., 6 = воскресенье
+        
+        if current_weekday == 0:
+            # Если сегодня понедельник - формируем прошлую неделю
+            # Прошлый понедельник - это 7 дней назад
+            week_start = today - timedelta(days=7)
+        else:
+            # Если сегодня вторник или другие дни - формируем текущую неделю
+            # Находим понедельник текущей недели
+            days_from_monday = current_weekday
+            week_start = today - timedelta(days=days_from_monday)
+        
         return week_start, yesterday
     
     elif period_type == 'month':
-        # Месяц - с 1-го числа текущего месяца до вчера включительно
-        month_start = date(today.year, today.month, 1)
-        return month_start, yesterday
+        # Месяц - с 1-го числа текущего или прошлого месяца до вчера включительно
+        if today.day == 1:
+            # Если сегодня 1-е число - формируем прошлый месяц
+            if today.month == 1:
+                # Если январь, то прошлый месяц - декабрь прошлого года
+                month_start = date(today.year - 1, 12, 1)
+                # Конец прошлого месяца
+                last_day = calendar.monthrange(today.year - 1, 12)[1]
+                month_end = date(today.year - 1, 12, last_day)
+            else:
+                # Обычный случай - прошлый месяц
+                month_start = date(today.year, today.month - 1, 1)
+                # Конец прошлого месяца
+                last_day = calendar.monthrange(today.year, today.month - 1)[1]
+                month_end = date(today.year, today.month - 1, last_day)
+            
+            # Возвращаем весь прошлый месяц (до конца прошлого месяца, но не позже вчера)
+            return month_start, min(month_end, yesterday)
+        else:
+            # Если сегодня 2-е или другие дни - формируем текущий месяц с 1-го числа
+            month_start = date(today.year, today.month, 1)
+            return month_start, yesterday
     
     else:
         raise ValueError(f"Неизвестный тип периода: {period_type}")
