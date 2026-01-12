@@ -11,7 +11,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -24,16 +24,16 @@ from telegram.error import Conflict, NetworkError, TimedOut
 from app.core.config import TELEGRAM_BOT_TOKEN, Roles, Shifts
 from app.core.database import DatabaseManager, RoleEnum, ShiftEnum, TaskStatusEnum
 from app.core.models import User
-from app.core.utils import logger, generate_csv_report, generate_pdf_report, get_period_dates, get_now_utc3
+from app.core.utils import logger, generate_csv_report, generate_pdf_report, get_period_dates, get_now_utc3, get_today_utc3
 
 # Состояния для ConversationHandler
-SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, SELECTING_SHIFT, CONFIRMING_TASK = range(6)
-SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(6, 8)
-SELECTING_STATUS = 8  # Состояние для выбора статуса заданий
-SELECTING_REPORT_PERIOD = 9  # Состояние для выбора периода отчета
-SELECTING_REPORT_FORMAT = 10  # Состояние для выбора формата отчета
-ENTERING_REPORT_DATE_FROM = 11  # Состояние для ввода даты начала кастомного периода
-ENTERING_REPORT_DATE_TO = 12  # Состояние для ввода даты конца кастомного периода
+SELECTING_TASK_DATE, SELECTING_SHIFT, SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, CONFIRMING_TASK, HANDLING_ERROR = range(8)
+SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(8, 10)
+SELECTING_STATUS = 10  # Состояние для выбора статуса заданий
+SELECTING_REPORT_PERIOD = 11  # Состояние для выбора периода отчета
+SELECTING_REPORT_FORMAT = 12  # Состояние для выбора формата отчета
+ENTERING_REPORT_DATE_FROM = 13  # Состояние для ввода даты начала кастомного периода
+ENTERING_REPORT_DATE_TO = 14  # Состояние для ввода даты конца кастомного периода
 
 # Глобальные переменные для хранения данных при создании задания
 task_data = {}
@@ -87,6 +87,156 @@ def get_main_keyboard(role: str):
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
+async def show_error_choice(update_or_query, error_message: str, previous_state, context: ContextTypes.DEFAULT_TYPE):
+    """Показать выбор действия при ошибке: вернуться назад или отменить"""
+    keyboard = [
+        [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+        [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Сохраняем предыдущее состояние для возможности вернуться
+    if isinstance(update_or_query, Update):
+        context.user_data['error_previous_state'] = previous_state
+        await update_or_query.message.reply_text(
+            f"{error_message}\n\n"
+            "Выберите действие:",
+            reply_markup=reply_markup
+        )
+    else:
+        # Это CallbackQuery
+        context.user_data['error_previous_state'] = previous_state
+        await update_or_query.edit_message_text(
+            f"{error_message}\n\n"
+            "Выберите действие:",
+            reply_markup=reply_markup
+        )
+    return HANDLING_ERROR
+
+
+async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора действия при ошибке"""
+    query = update.callback_query
+    await query.answer()
+    
+    previous_state = context.user_data.get('error_previous_state')
+    context.user_data.pop('error_previous_state', None)
+    
+    if query.data == "error_cancel":
+        await query.edit_message_text("❌ Создание задания отменено.")
+        task_data.pop(update.effective_user.id, None)
+        return ConversationHandler.END
+    
+    elif query.data == "error_back":
+        # Возвращаемся на предыдущий шаг
+        if previous_state == SELECTING_TASK_DATE:
+            # Это первый шаг, возвращаемся к выбору даты с кнопками
+            today = get_today_utc3()
+            tomorrow = today + timedelta(days=1)
+            keyboard = [
+                [InlineKeyboardButton(f"📅 Сегодня ({today.strftime('%d.%m.%Y')})", callback_data="date_today")],
+                [InlineKeyboardButton(f"📅 Завтра ({tomorrow.strftime('%d.%m.%Y')})", callback_data="date_tomorrow")],
+                [InlineKeyboardButton("📝 Ввести свою дату", callback_data="date_custom")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "📋 Создание задания\n\n"
+                f"Выберите дату задания:\n"
+                f"Сегодня: {today.strftime('%d.%m.%Y')}\n"
+                f"Дата может быть сегодняшней или будущей (но не прошедшей).",
+                reply_markup=reply_markup
+            )
+            context.user_data.pop('waiting_custom_date', None)  # Сбрасываем флаг
+            return SELECTING_TASK_DATE
+        elif previous_state == SELECTING_SHIFT:
+            keyboard = [
+                [InlineKeyboardButton("1-я смена (8:00-20:00)", callback_data="shift_1")],
+                [InlineKeyboardButton("2-я смена (20:00-8:00)", callback_data="shift_2")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            task_date = task_data.get(update.effective_user.id, {}).get('task_date')
+            task_date_str = task_date.strftime('%d.%m.%Y') if task_date else "не указана"
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"✅ Дата задания: {task_date_str}\n\n"
+                "Выберите смену:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_SHIFT
+        elif previous_state == SELECTING_EQUIPMENT:
+            with DatabaseManager() as db:
+                equipment_list = db.get_all_equipment()
+                keyboard = []
+                for eq in equipment_list:
+                    workshop_name = eq.workshop.name if eq.workshop else "Без участка"
+                    keyboard.append([InlineKeyboardButton(
+                        f"{eq.name} ({workshop_name})",
+                        callback_data=f"eq_{eq.id}"
+                    )])
+                keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+                
+                shift = task_data.get(update.effective_user.id, {}).get('shift')
+                shift_name = "1-я смена (8:00-20:00)" if shift and shift.value == 1 else "2-я смена (20:00-8:00)"
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    f"✅ Смена: {shift_name}\n\n"
+                    "Выберите оборудование:",
+                    reply_markup=reply_markup
+                )
+            return SELECTING_EQUIPMENT
+        elif previous_state == SELECTING_PRODUCT:
+            # Возвращаемся к выбору оборудования, чтобы можно было выбрать другое
+            with DatabaseManager() as db:
+                equipment_list = db.get_all_equipment()
+                keyboard = []
+                for eq in equipment_list:
+                    workshop_name = eq.workshop.name if eq.workshop else "Без участка"
+                    keyboard.append([InlineKeyboardButton(
+                        f"{eq.name} ({workshop_name})",
+                        callback_data=f"eq_{eq.id}"
+                    )])
+                keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+                
+                shift = task_data.get(update.effective_user.id, {}).get('shift')
+                shift_name = "1-я смена (8:00-20:00)" if shift and shift.value == 1 else "2-я смена (20:00-8:00)"
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    f"✅ Смена: {shift_name}\n\n"
+                    "Выберите оборудование:",
+                    reply_markup=reply_markup
+                )
+            return SELECTING_EQUIPMENT
+        elif previous_state == ENTERING_QUANTITY:
+            # Возвращаемся к выбору продукции
+            equipment_id = task_data.get(update.effective_user.id, {}).get('equipment_id')
+            with DatabaseManager() as db:
+                products = db.get_all_products()
+                available_products = []
+                for product in products:
+                    equipment_for_product = db.get_equipment_for_product(product.id)
+                    if any(eq.id == equipment_id for eq in equipment_for_product) or product.default_equipment_id == equipment_id:
+                        available_products.append(product)
+                
+                keyboard = []
+                for product in available_products:
+                    keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
+                keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    "Выберите продукцию:",
+                    reply_markup=reply_markup
+                )
+            return SELECTING_PRODUCT
+        elif previous_state == SELECTING_EMPLOYEE:
+            # Возвращаемся к вводу количества
+            await query.edit_message_text("Введите количество продукции (число):")
+            return ENTERING_QUANTITY
+    
+    return ConversationHandler.END
+
+
 def role_required(required_roles: list):
     """Декоратор для проверки роли пользователя"""
     def decorator(func):
@@ -104,21 +254,203 @@ def role_required(required_roles: list):
 
 @role_required(['admin', 'manager'])
 async def create_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало создания задания (только для начальника)"""
+    """Начало создания задания (только для начальника) - выбор даты"""
     global task_data
     task_data[update.effective_user.id] = {}
     
+    # Запрашиваем дату задания с кнопками быстрого выбора
+    today = get_today_utc3()
+    tomorrow = today + timedelta(days=1)
+    
+    keyboard = [
+        [InlineKeyboardButton(f"📅 Сегодня ({today.strftime('%d.%m.%Y')})", callback_data="date_today")],
+        [InlineKeyboardButton(f"📅 Завтра ({tomorrow.strftime('%d.%m.%Y')})", callback_data="date_tomorrow")],
+        [InlineKeyboardButton("📝 Ввести свою дату", callback_data="date_custom")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📋 Создание задания\n\n"
+        f"Выберите дату задания:\n"
+        f"Сегодня: {today.strftime('%d.%m.%Y')}\n"
+        f"Дата может быть сегодняшней или будущей (но не прошедшей).",
+        reply_markup=reply_markup
+    )
+    return SELECTING_TASK_DATE
+
+
+async def select_task_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора даты задания (кнопки или ввод)"""
+    query = update.callback_query
+    today = get_today_utc3()
+    
+    # Если это callback от кнопки
+    if query:
+        await query.answer()
+        
+        if query.data == "date_today":
+            task_date = today
+        elif query.data == "date_tomorrow":
+            task_date = today + timedelta(days=1)
+        elif query.data == "date_custom":
+            # Запрашиваем ввод кастомной даты
+            await query.edit_message_text(
+                "📋 Создание задания\n\n"
+                f"Введите дату задания в формате ДД.ММ.ГГГГ\n"
+                f"Сегодня: {today.strftime('%d.%m.%Y')}\n"
+                f"Дата может быть сегодняшней или будущей (но не прошедшей)."
+            )
+            context.user_data['waiting_custom_date'] = True
+            return SELECTING_TASK_DATE
+        elif query.data == "cancel":
+            await query.edit_message_text("❌ Создание задания отменено.")
+            task_data.pop(update.effective_user.id, None)
+            return ConversationHandler.END
+        else:
+            return SELECTING_TASK_DATE
+        
+        # Сохраняем дату
+        task_data[update.effective_user.id]['task_date'] = task_date
+        
+        # Предлагаем выбрать смену
+        keyboard = [
+            [InlineKeyboardButton("1-я смена (8:00-20:00)", callback_data="shift_1")],
+            [InlineKeyboardButton("2-я смена (20:00-8:00)", callback_data="shift_2")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"✅ Дата задания: {task_date.strftime('%d.%m.%Y')}\n\n"
+            "Выберите смену:",
+            reply_markup=reply_markup
+        )
+        return SELECTING_SHIFT
+    
+    # Если это текстовое сообщение (ввод кастомной даты)
+    else:
+        # Проверяем, что мы действительно ожидаем ввод даты
+        if not context.user_data.get('waiting_custom_date'):
+            # Если не ожидали ввод, показываем кнопки снова
+            tomorrow = today + timedelta(days=1)
+            keyboard = [
+                [InlineKeyboardButton(f"📅 Сегодня ({today.strftime('%d.%m.%Y')})", callback_data="date_today")],
+                [InlineKeyboardButton(f"📅 Завтра ({tomorrow.strftime('%d.%m.%Y')})", callback_data="date_tomorrow")],
+                [InlineKeyboardButton("📝 Ввести свою дату", callback_data="date_custom")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "📋 Создание задания\n\n"
+                f"Выберите дату задания:\n"
+                f"Сегодня: {today.strftime('%d.%m.%Y')}\n"
+                f"Дата может быть сегодняшней или будущей (но не прошедшей).",
+                reply_markup=reply_markup
+            )
+            return SELECTING_TASK_DATE
+        
+        # Обрабатываем ввод кастомной даты
+        try:
+            # Парсим дату в формате ДД.ММ.ГГГГ
+            date_str = update.message.text.strip()
+            try:
+                task_date = datetime.strptime(date_str, '%d.%m.%Y').date()
+            except ValueError:
+                # Для ошибок формата также даем выбор действий
+                keyboard = [
+                    [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+                    [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                context.user_data['error_previous_state'] = SELECTING_TASK_DATE
+                context.user_data['waiting_custom_date'] = True  # Сохраняем флаг
+                await update.message.reply_text(
+                    "❌ Неверный формат даты. Используйте формат ДД.ММ.ГГГГ\n"
+                    "Например: 15.01.2026\n\n"
+                    "Выберите действие:",
+                    reply_markup=reply_markup
+                )
+                return HANDLING_ERROR
+            
+            # Проверяем, что дата не в прошлом
+            if task_date < today:
+                keyboard = [
+                    [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+                    [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                context.user_data['error_previous_state'] = SELECTING_TASK_DATE
+                context.user_data['waiting_custom_date'] = True  # Сохраняем флаг
+                await update.message.reply_text(
+                    f"❌ Дата задания не может быть раньше сегодняшней даты ({today.strftime('%d.%m.%Y')})\n\n"
+                    "Выберите действие:",
+                    reply_markup=reply_markup
+                )
+                return HANDLING_ERROR
+            
+            # Сохраняем дату
+            task_data[update.effective_user.id]['task_date'] = task_date
+            context.user_data.pop('waiting_custom_date', None)  # Убираем флаг
+            
+            # Предлагаем выбрать смену
+            keyboard = [
+                [InlineKeyboardButton("1-я смена (8:00-20:00)", callback_data="shift_1")],
+                [InlineKeyboardButton("2-я смена (20:00-8:00)", callback_data="shift_2")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"✅ Дата задания: {task_date.strftime('%d.%m.%Y')}\n\n"
+                "Выберите смену:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_SHIFT
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки даты задания: {e}")
+            context.user_data.pop('waiting_custom_date', None)
+            # Для критических ошибок показываем выбор действия
+            return await show_error_choice(
+                update,
+                f"❌ Критическая ошибка обработки даты: {str(e)}\nПопробуйте еще раз или вернитесь назад.",
+                SELECTING_TASK_DATE,
+                context
+            )
+
+
+async def select_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора смены"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Создание задания отменено.")
+        task_data.pop(update.effective_user.id, None)
+        return ConversationHandler.END
+    
+    shift = int(query.data.split("_")[1])
+    task_data[update.effective_user.id]['shift'] = ShiftEnum(shift)
+    
+    # Теперь выбираем оборудование
     with DatabaseManager() as db:
         workshops = db.get_all_workshops()
         if not workshops:
-            await update.message.reply_text("❌ В системе нет участков. Обратитесь к администратору.")
-            return ConversationHandler.END
+            return await show_error_choice(
+                query,
+                "❌ В системе нет участков. Обратитесь к администратору.",
+                SELECTING_SHIFT,
+                context
+            )
         
         # Получаем оборудование
         equipment_list = db.get_all_equipment()
         if not equipment_list:
-            await update.message.reply_text("❌ В системе нет оборудования. Обратитесь к администратору.")
-            return ConversationHandler.END
+            return await show_error_choice(
+                query,
+                "❌ В системе нет оборудования. Обратитесь к администратору.",
+                SELECTING_SHIFT,
+                context
+            )
         
         # Создаем клавиатуру с оборудованием
         keyboard = []
@@ -130,9 +462,11 @@ async def create_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
+        shift_name = "1-я смена (8:00-20:00)" if shift == 1 else "2-я смена (20:00-8:00)"
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "📋 Создание задания\n\nВыберите оборудование:",
+        await query.edit_message_text(
+            f"✅ Смена: {shift_name}\n\n"
+            "Выберите оборудование:",
             reply_markup=reply_markup
         )
         return SELECTING_EQUIPMENT
@@ -154,9 +488,12 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with DatabaseManager() as db:
         products = db.get_all_products()
         if not products:
-            await query.edit_message_text("❌ В системе нет продукции. Обратитесь к администратору.")
-            task_data.pop(update.effective_user.id, None)
-            return ConversationHandler.END
+            return await show_error_choice(
+                query,
+                "❌ В системе нет продукции. Обратитесь к администратору.",
+                SELECTING_EQUIPMENT,
+                context
+            )
         
         # Фильтруем продукцию, доступную для выбранного оборудования
         available_products = []
@@ -166,9 +503,12 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 available_products.append(product)
         
         if not available_products:
-            await query.edit_message_text("❌ Для выбранного оборудования нет доступной продукции.")
-            task_data.pop(update.effective_user.id, None)
-            return ConversationHandler.END
+            return await show_error_choice(
+                query,
+                "❌ Для выбранного оборудования нет доступной продукции.",
+                SELECTING_EQUIPMENT,
+                context
+            )
         
         keyboard = []
         for product in available_products:
@@ -205,17 +545,30 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         quantity = float(update.message.text.replace(",", "."))
         if quantity <= 0:
-            await update.message.reply_text("❌ Количество должно быть больше нуля. Введите корректное значение:")
-            return ENTERING_QUANTITY
+            keyboard = [
+                [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+                [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            context.user_data['error_previous_state'] = ENTERING_QUANTITY
+            await update.message.reply_text(
+                "❌ Количество должно быть больше нуля.\n\n"
+                "Выберите действие:",
+                reply_markup=reply_markup
+            )
+            return HANDLING_ERROR
         
         task_data[update.effective_user.id]['planned_quantity'] = quantity
         
         with DatabaseManager() as db:
             employees = db.get_all_employees()
             if not employees:
-                await update.message.reply_text("❌ В системе нет сотрудников.")
-                task_data.pop(update.effective_user.id, None)
-                return ConversationHandler.END
+                return await show_error_choice(
+                    update,
+                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
+                    ENTERING_QUANTITY,
+                    context
+                )
             
             keyboard = []
             for emp in employees:
@@ -232,8 +585,18 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return SELECTING_EMPLOYEE
     except ValueError:
-        await update.message.reply_text("❌ Введите корректное число:")
-        return ENTERING_QUANTITY
+        keyboard = [
+            [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+            [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        context.user_data['error_previous_state'] = ENTERING_QUANTITY
+        await update.message.reply_text(
+            "❌ Неверный формат числа. Введите корректное число.\n\n"
+            "Выберите действие:",
+            reply_markup=reply_markup
+        )
+        return HANDLING_ERROR
 
 
 async def select_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -249,48 +612,23 @@ async def select_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     employee_id = int(query.data.split("_")[1])
     task_data[update.effective_user.id]['employee_id'] = employee_id
     
-    keyboard = [
-        [InlineKeyboardButton("1-я смена (8:00-20:00)", callback_data="shift_1")],
-        [InlineKeyboardButton("2-я смена (20:00-8:00)", callback_data="shift_2")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        "Выберите смену:",
-        reply_markup=reply_markup
-    )
-    return SELECTING_SHIFT
-
-
-async def select_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора смены"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "cancel":
-        await query.edit_message_text("❌ Создание задания отменено.")
-        task_data.pop(update.effective_user.id, None)
-        return ConversationHandler.END
-    
-    shift = int(query.data.split("_")[1])
-    task_data[update.effective_user.id]['shift'] = ShiftEnum(shift)
-    task_data[update.effective_user.id]['task_date'] = date.today()
-    
     # Формируем подтверждение
     with DatabaseManager() as db:
         equipment = db.get_equipment_by_id(task_data[update.effective_user.id]['equipment_id'])
         product = db.get_product_by_id(task_data[update.effective_user.id]['product_id'])
-        employee = db.db.query(User).filter(User.id == task_data[update.effective_user.id]['employee_id']).first()
+        employee = db.db.query(User).filter(User.id == employee_id).first()
         
-        shift_name = "1-я смена (8:00-20:00)" if shift == 1 else "2-я смена (20:00-8:00)"
+        shift = task_data[update.effective_user.id]['shift']
+        shift_name = "1-я смена (8:00-20:00)" if shift.value == 1 else "2-я смена (20:00-8:00)"
+        task_date = task_data[update.effective_user.id]['task_date']
         
         message = f"📋 Подтвердите создание задания:\n\n"
+        message += f"Дата: {task_date.strftime('%d.%m.%Y')}\n"
+        message += f"Смена: {shift_name}\n"
         message += f"Оборудование: {equipment.name}\n"
         message += f"Продукция: {product.name}\n"
         message += f"Количество: {task_data[update.effective_user.id]['planned_quantity']}\n"
-        message += f"Сотрудник: {employee.full_name or f'ID: {employee.telegram_id}'}\n"
-        message += f"Смена: {shift_name}\n"
-        message += f"Дата: {task_data[update.effective_user.id]['task_date'].strftime('%d.%m.%Y')}"
+        message += f"Сотрудник: {employee.full_name or f'ID: {employee.telegram_id}'}"
         
         keyboard = [
             [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_task")],
@@ -315,9 +653,12 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = task_data.get(user_id, {})
     
     if not all(k in data for k in ['equipment_id', 'product_id', 'planned_quantity', 'employee_id', 'shift', 'task_date']):
-        await query.edit_message_text("❌ Ошибка: не все данные заполнены.")
-        task_data.pop(user_id, None)
-        return ConversationHandler.END
+        return await show_error_choice(
+            query,
+            "❌ Ошибка: не все данные заполнены. Возможно, процесс создания был прерван.",
+            CONFIRMING_TASK,
+            context
+        )
     
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user_id)
@@ -1160,12 +1501,17 @@ def main():
     create_task_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📋 Создать задание$"), create_task_start)],
         states={
+            SELECTING_TASK_DATE: [
+                CallbackQueryHandler(select_task_date, pattern="^(date_|cancel)"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, select_task_date)
+            ],
+            SELECTING_SHIFT: [CallbackQueryHandler(select_shift)],
             SELECTING_EQUIPMENT: [CallbackQueryHandler(select_equipment)],
             SELECTING_PRODUCT: [CallbackQueryHandler(select_product)],
             ENTERING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_quantity)],
             SELECTING_EMPLOYEE: [CallbackQueryHandler(select_employee)],
-            SELECTING_SHIFT: [CallbackQueryHandler(select_shift)],
             CONFIRMING_TASK: [CallbackQueryHandler(confirm_task)],
+            HANDLING_ERROR: [CallbackQueryHandler(handle_error_choice, pattern="^error_")],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.Regex("^❌ Отмена$"), cancel)],
     )
