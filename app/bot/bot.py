@@ -27,7 +27,7 @@ from app.core.models import User
 from app.core.utils import logger, generate_csv_report, generate_pdf_report, get_period_dates, get_now_utc3, get_today_utc3
 
 # Состояния для ConversationHandler
-SELECTING_TASK_DATE, SELECTING_SHIFT, SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, SELECTING_EMPLOYEE, CONFIRMING_TASK, HANDLING_ERROR = range(8)
+SELECTING_TASK_DATE, SELECTING_SHIFT, SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, ADDING_MORE_PRODUCTS, SELECTING_EMPLOYEE, CONFIRMING_TASK, HANDLING_ERROR = range(9)
 SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(8, 10)
 SELECTING_STATUS = 10  # Состояние для выбора статуса заданий
 SELECTING_REPORT_PERIOD = 11  # Состояние для выбора периода отчета
@@ -186,41 +186,26 @@ async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             return SELECTING_EQUIPMENT
         elif previous_state == SELECTING_PRODUCT:
-            # Возвращаемся к выбору оборудования, чтобы можно было выбрать другое
-            with DatabaseManager() as db:
-                equipment_list = db.get_all_equipment()
-                keyboard = []
-                for eq in equipment_list:
-                    workshop_name = eq.workshop.name if eq.workshop else "Без участка"
-                    keyboard.append([InlineKeyboardButton(
-                        f"{eq.name} ({workshop_name})",
-                        callback_data=f"eq_{eq.id}"
-                    )])
-                keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-                
-                shift = task_data.get(update.effective_user.id, {}).get('shift')
-                shift_name = "1-я смена (8:00-20:00)" if shift and shift.value == 1 else "2-я смена (20:00-8:00)"
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(
-                    f"✅ Смена: {shift_name}\n\n"
-                    "Выберите оборудование:",
-                    reply_markup=reply_markup
-                )
-            return SELECTING_EQUIPMENT
-        elif previous_state == ENTERING_QUANTITY:
             # Возвращаемся к выбору продукции
-            equipment_id = task_data.get(update.effective_user.id, {}).get('equipment_id')
+            user_id = update.effective_user.id
+            equipment_id = task_data.get(user_id, {}).get('equipment_id')
             with DatabaseManager() as db:
                 products = db.get_all_products()
+                # Фильтруем продукцию, доступную для выбранного оборудования
                 available_products = []
                 for product in products:
                     equipment_for_product = db.get_equipment_for_product(product.id)
                     if any(eq.id == equipment_id for eq in equipment_for_product) or product.default_equipment_id == equipment_id:
-                        available_products.append(product)
+                        # Исключаем уже добавленные продукты
+                        added_product_ids = [p['product_id'] for p in task_data.get(user_id, {}).get('products', [])]
+                        if product.id not in added_product_ids:
+                            available_products.append(product)
                 
                 keyboard = []
                 for product in available_products:
                     keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
+                if task_data.get(user_id, {}).get('products'):
+                    keyboard.append([InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")])
                 keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -229,10 +214,50 @@ async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
                     reply_markup=reply_markup
                 )
             return SELECTING_PRODUCT
-        elif previous_state == SELECTING_EMPLOYEE:
-            # Возвращаемся к вводу количества
+        elif previous_state == ENTERING_QUANTITY:
+            # Возвращаемся к вводу количества (но это не должно происходить, так как после количества идет выбор добавить еще)
             await query.edit_message_text("Введите количество продукции (число):")
             return ENTERING_QUANTITY
+        elif previous_state == ADDING_MORE_PRODUCTS:
+            # Возвращаемся к выбору: добавить еще или продолжить
+            user_id = update.effective_user.id
+            products_list = task_data.get(user_id, {}).get('products', [])
+            products_text = "📋 Добавленные продукты:\n\n"
+            for idx, prod in enumerate(products_list, 1):
+                products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
+                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"{products_text}\n"
+                "Выберите действие:",
+                reply_markup=reply_markup
+            )
+            return ADDING_MORE_PRODUCTS
+        elif previous_state == SELECTING_EMPLOYEE:
+            # Возвращаемся к выбору: добавить еще или продолжить
+            user_id = update.effective_user.id
+            products_list = task_data.get(user_id, {}).get('products', [])
+            products_text = "📋 Добавленные продукты:\n\n"
+            for idx, prod in enumerate(products_list, 1):
+                products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
+                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"{products_text}\n"
+                "Выберите действие:",
+                reply_markup=reply_markup
+            )
+            return ADDING_MORE_PRODUCTS
     
     return ConversationHandler.END
 
@@ -256,7 +281,9 @@ def role_required(required_roles: list):
 async def create_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало создания задания (только для начальника) - выбор даты"""
     global task_data
-    task_data[update.effective_user.id] = {}
+    task_data[update.effective_user.id] = {
+        'products': []  # Список продуктов: [{'product_id': int, 'quantity': float, 'product_name': str}]
+    }
     
     # Запрашиваем дату задания с кнопками быстрого выбора
     today = get_today_utc3()
@@ -533,7 +560,36 @@ async def select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data.pop(update.effective_user.id, None)
         return ConversationHandler.END
     
+    # Проверяем, не является ли это кнопкой "Продолжить"
+    if query.data == "continue_to_employee":
+        # Переходим к выбору сотрудника
+        with DatabaseManager() as db:
+            employees = db.get_all_employees()
+            if not employees:
+                return await show_error_choice(
+                    query,
+                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
+                    SELECTING_PRODUCT,
+                    context
+                )
+            
+            keyboard = []
+            for emp in employees:
+                keyboard.append([InlineKeyboardButton(
+                    emp.full_name or f"ID: {emp.telegram_id}",
+                    callback_data=f"emp_{emp.id}"
+                )])
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Выберите ответственного сотрудника:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_EMPLOYEE
+    
     product_id = int(query.data.split("_")[1])
+    # Сохраняем product_id временно для ввода количества
     task_data[update.effective_user.id]['product_id'] = product_id
     
     await query.edit_message_text("Введите количество продукции (число):")
@@ -558,32 +614,61 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return HANDLING_ERROR
         
-        task_data[update.effective_user.id]['planned_quantity'] = quantity
+        # Получаем информацию о выбранном продукте
+        user_id = update.effective_user.id
+        product_id = task_data[user_id].get('product_id')
         
-        with DatabaseManager() as db:
-            employees = db.get_all_employees()
-            if not employees:
-                return await show_error_choice(
-                    update,
-                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
-                    ENTERING_QUANTITY,
-                    context
-                )
-            
-            keyboard = []
-            for emp in employees:
-                keyboard.append([InlineKeyboardButton(
-                    emp.full_name or f"ID: {emp.telegram_id}",
-                    callback_data=f"emp_{emp.id}"
-                )])
-            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-            
+        if not product_id:
+            keyboard = [
+                [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
+                [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
+            context.user_data['error_previous_state'] = ENTERING_QUANTITY
             await update.message.reply_text(
-                "Выберите ответственного сотрудника:",
+                "❌ Ошибка: продукция не выбрана. Попробуйте еще раз.\n\n"
+                "Выберите действие:",
                 reply_markup=reply_markup
             )
-            return SELECTING_EMPLOYEE
+            return HANDLING_ERROR
+        
+        with DatabaseManager() as db:
+            product = db.get_product_by_id(product_id)
+            product_name = product.name if product else f"Продукт ID: {product_id}"
+            
+            # Добавляем продукт в список
+            if 'products' not in task_data[user_id]:
+                task_data[user_id]['products'] = []
+            
+            task_data[user_id]['products'].append({
+                'product_id': product_id,
+                'quantity': quantity,
+                'product_name': product_name
+            })
+            
+            # Удаляем временный product_id
+            task_data[user_id].pop('product_id', None)
+            
+            # Формируем список добавленных продуктов
+            products_list = task_data[user_id]['products']
+            products_text = "📋 Добавленные продукты:\n\n"
+            for idx, prod in enumerate(products_list, 1):
+                products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+            
+            # Предлагаем добавить еще продукцию или продолжить
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
+                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"{products_text}\n"
+                "Выберите действие:",
+                reply_markup=reply_markup
+            )
+            return ADDING_MORE_PRODUCTS
+            
     except ValueError:
         keyboard = [
             [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
@@ -599,6 +684,88 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return HANDLING_ERROR
 
 
+async def handle_add_more_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора: добавить еще продукцию или продолжить"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Создание задания отменено.")
+        task_data.pop(update.effective_user.id, None)
+        return ConversationHandler.END
+    
+    user_id = update.effective_user.id
+    equipment_id = task_data[user_id].get('equipment_id')
+    
+    if query.data == "add_more_product":
+        # Возвращаемся к выбору продукции
+        with DatabaseManager() as db:
+            products = db.get_all_products()
+            # Фильтруем продукцию, доступную для выбранного оборудования
+            available_products = []
+            for product in products:
+                equipment_for_product = db.get_equipment_for_product(product.id)
+                if any(eq.id == equipment_id for eq in equipment_for_product) or product.default_equipment_id == equipment_id:
+                    # Исключаем уже добавленные продукты
+                    added_product_ids = [p['product_id'] for p in task_data[user_id].get('products', [])]
+                    if product.id not in added_product_ids:
+                        available_products.append(product)
+            
+            if not available_products:
+                # Если нет доступных продуктов, предлагаем продолжить
+                keyboard = [
+                    [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    "❌ Нет доступной продукции для добавления.\n\n"
+                    "Выберите действие:",
+                    reply_markup=reply_markup
+                )
+                return ADDING_MORE_PRODUCTS
+            
+            keyboard = []
+            for product in available_products:
+                keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
+            keyboard.append([InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")])
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Выберите продукцию для добавления:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_PRODUCT
+    
+    elif query.data == "continue_to_employee":
+        # Переходим к выбору сотрудника
+        with DatabaseManager() as db:
+            employees = db.get_all_employees()
+            if not employees:
+                return await show_error_choice(
+                    query,
+                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
+                    ADDING_MORE_PRODUCTS,
+                    context
+                )
+            
+            keyboard = []
+            for emp in employees:
+                keyboard.append([InlineKeyboardButton(
+                    emp.full_name or f"ID: {emp.telegram_id}",
+                    callback_data=f"emp_{emp.id}"
+                )])
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Выберите ответственного сотрудника:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_EMPLOYEE
+
+
 async def select_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора сотрудника"""
     query = update.callback_query
@@ -612,23 +779,24 @@ async def select_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     employee_id = int(query.data.split("_")[1])
     task_data[update.effective_user.id]['employee_id'] = employee_id
     
-    # Формируем подтверждение
+    # Формируем подтверждение со списком всех продуктов
     with DatabaseManager() as db:
         equipment = db.get_equipment_by_id(task_data[update.effective_user.id]['equipment_id'])
-        product = db.get_product_by_id(task_data[update.effective_user.id]['product_id'])
         employee = db.db.query(User).filter(User.id == employee_id).first()
         
         shift = task_data[update.effective_user.id]['shift']
         shift_name = "1-я смена (8:00-20:00)" if shift.value == 1 else "2-я смена (20:00-8:00)"
         task_date = task_data[update.effective_user.id]['task_date']
+        products_list = task_data[update.effective_user.id].get('products', [])
         
         message = f"📋 Подтвердите создание задания:\n\n"
         message += f"Дата: {task_date.strftime('%d.%m.%Y')}\n"
         message += f"Смена: {shift_name}\n"
         message += f"Оборудование: {equipment.name}\n"
-        message += f"Продукция: {product.name}\n"
-        message += f"Количество: {task_data[update.effective_user.id]['planned_quantity']}\n"
-        message += f"Сотрудник: {employee.full_name or f'ID: {employee.telegram_id}'}"
+        message += f"Сотрудник: {employee.full_name or f'ID: {employee.telegram_id}'}\n\n"
+        message += f"Продукция ({len(products_list)} позиций):\n"
+        for idx, prod in enumerate(products_list, 1):
+            message += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
         
         keyboard = [
             [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_task")],
@@ -652,7 +820,8 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = task_data.get(user_id, {})
     
-    if not all(k in data for k in ['equipment_id', 'product_id', 'planned_quantity', 'employee_id', 'shift', 'task_date']):
+    # Проверяем наличие всех необходимых данных
+    if not all(k in data for k in ['equipment_id', 'employee_id', 'shift', 'task_date']):
         return await show_error_choice(
             query,
             "❌ Ошибка: не все данные заполнены. Возможно, процесс создания был прерван.",
@@ -660,38 +829,54 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context
         )
     
+    products_list = data.get('products', [])
+    if not products_list:
+        return await show_error_choice(
+            query,
+            "❌ Ошибка: не добавлено ни одной продукции. Добавьте хотя бы одну продукцию.",
+            CONFIRMING_TASK,
+            context
+        )
+    
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user_id)
-        
-        # Создаем задание
-        task = db.create_task(
-            manager_id=manager.id,
-            employee_id=data['employee_id'],
-            equipment_id=data['equipment_id'],
-            product_id=data['product_id'],
-            planned_quantity=data['planned_quantity'],
-            shift=data['shift'],
-            task_date=datetime.combine(data['task_date'], datetime.min.time()),
-            notes=None
-        )
-        
-        # Отправляем уведомление сотруднику
         employee = db.db.query(User).filter(User.id == data['employee_id']).first()
+        equipment = db.get_equipment_by_id(data['equipment_id'])
+        shift_name = "1-я смена (8:00-20:00)" if data['shift'].value == 1 else "2-я смена (20:00-8:00)"
+        task_date_dt = datetime.combine(data['task_date'], datetime.min.time())
+        
+        # Создаем задания для каждой продукции
+        created_tasks = []
+        for prod in products_list:
+            task = db.create_task(
+                manager_id=manager.id,
+                employee_id=data['employee_id'],
+                equipment_id=data['equipment_id'],
+                product_id=prod['product_id'],
+                planned_quantity=prod['quantity'],
+                shift=data['shift'],
+                task_date=task_date_dt,
+                notes=None
+            )
+            created_tasks.append(task)
+            logger.info(f"Создано задание {task.id} менеджером {manager.telegram_id}")
+        
+        # Формируем общее уведомление для сотрудника
         if employee:
-            equipment = db.get_equipment_by_id(data['equipment_id'])
-            product = db.get_product_by_id(data['product_id'])
-            shift_name = "1-я смена (8:00-20:00)" if data['shift'].value == 1 else "2-я смена (20:00-8:00)"
-            
-            notification_msg = f"📋 Вам назначено новое задание №{task.id}\n\n"
-            notification_msg += f"Оборудование: {equipment.name}\n"
-            notification_msg += f"Продукция: {product.name}\n"
-            notification_msg += f"Количество: {data['planned_quantity']}\n"
+            notification_msg = f"📋 Вам назначено задание ({len(created_tasks)} позиций)\n\n"
+            notification_msg += f"Дата: {data['task_date'].strftime('%d.%m.%Y')}\n"
             notification_msg += f"Смена: {shift_name}\n"
-            notification_msg += f"Дата: {data['task_date'].strftime('%d.%m.%Y')}"
+            notification_msg += f"Оборудование: {equipment.name}\n\n"
+            notification_msg += "Продукция:\n"
+            for idx, prod in enumerate(products_list, 1):
+                notification_msg += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
             
-            db.create_notification(employee.id, task.id, notification_msg)
+            # Создаем уведомление для каждого задания
+            task_ids = [str(t.id) for t in created_tasks]
+            for task in created_tasks:
+                db.create_notification(employee.id, task.id, notification_msg)
             
-            # Отправляем уведомление сотруднику в Telegram
+            # Отправляем одно уведомление сотруднику в Telegram
             try:
                 await context.bot.send_message(
                     chat_id=employee.telegram_id,
@@ -701,9 +886,14 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления сотруднику: {e}")
         
-        await query.edit_message_text(f"✅ Задание №{task.id} успешно создано и отправлено сотруднику!")
+        # Формируем сообщение о создании
+        tasks_info = ", ".join([f"№{t.id}" for t in created_tasks])
+        await query.edit_message_text(
+            f"✅ Задания успешно созданы и отправлены сотруднику!\n\n"
+            f"Создано заданий: {len(created_tasks)}\n"
+            f"Номера заданий: {tasks_info}"
+        )
         task_data.pop(user_id, None)
-        logger.info(f"Создано задание {task.id} менеджером {manager.telegram_id}")
     
     return ConversationHandler.END
 
@@ -1509,6 +1699,7 @@ def main():
             SELECTING_EQUIPMENT: [CallbackQueryHandler(select_equipment)],
             SELECTING_PRODUCT: [CallbackQueryHandler(select_product)],
             ENTERING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_quantity)],
+            ADDING_MORE_PRODUCTS: [CallbackQueryHandler(handle_add_more_products, pattern="^(add_more_product|continue_to_employee|cancel)")],
             SELECTING_EMPLOYEE: [CallbackQueryHandler(select_employee)],
             CONFIRMING_TASK: [CallbackQueryHandler(confirm_task)],
             HANDLING_ERROR: [CallbackQueryHandler(handle_error_choice, pattern="^error_")],
