@@ -27,7 +27,7 @@ from app.core.models import User
 from app.core.utils import logger, generate_csv_report, generate_pdf_report, get_period_dates, get_now_utc3, get_today_utc3
 
 # Состояния для ConversationHandler
-SELECTING_TASK_DATE, SELECTING_SHIFT, SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, ADDING_MORE_PRODUCTS, SELECTING_EMPLOYEE, CONFIRMING_TASK, HANDLING_ERROR = range(9)
+SELECTING_TASK_DATE, SELECTING_SHIFT, SELECTING_WORKSHOP, SELECTING_EQUIPMENT, SELECTING_PRODUCT, ENTERING_QUANTITY, ADDING_MORE_PRODUCTS, ADDING_MORE_EQUIPMENT, SELECTING_EMPLOYEE, CONFIRMING_TASK, HANDLING_ERROR = range(11)
 SELECTING_TASK_FOR_CONFIRM, ENTERING_ACTUAL_QUANTITY = range(8, 10)
 SELECTING_STATUS = 10  # Состояние для выбора статуса заданий
 SELECTING_REPORT_PERIOD = 11  # Состояние для выбора периода отчета
@@ -164,16 +164,12 @@ async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=reply_markup
             )
             return SELECTING_SHIFT
-        elif previous_state == SELECTING_EQUIPMENT:
+        elif previous_state == SELECTING_WORKSHOP:
             with DatabaseManager() as db:
-                equipment_list = db.get_all_equipment()
+                workshops = db.get_all_workshops()
                 keyboard = []
-                for eq in equipment_list:
-                    workshop_name = eq.workshop.name if eq.workshop else "Без участка"
-                    keyboard.append([InlineKeyboardButton(
-                        f"{eq.name} ({workshop_name})",
-                        callback_data=f"eq_{eq.id}"
-                    )])
+                for workshop in workshops:
+                    keyboard.append([InlineKeyboardButton(workshop.name, callback_data=f"ws_{workshop.id}")])
                 keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
                 
                 shift = task_data.get(update.effective_user.id, {}).get('shift')
@@ -181,54 +177,111 @@ async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text(
                     f"✅ Смена: {shift_name}\n\n"
-                    "Выберите оборудование:",
+                    "Выберите участок:",
+                    reply_markup=reply_markup
+                )
+            return SELECTING_WORKSHOP
+        elif previous_state == SELECTING_EQUIPMENT:
+            user_id = update.effective_user.id
+            workshop_id = task_data.get(user_id, {}).get('workshop_id')
+            with DatabaseManager() as db:
+                workshop = db.get_workshop_by_id(workshop_id) if workshop_id else None
+                equipment_list = db.get_all_equipment(workshop_id=workshop_id) if workshop_id else db.get_all_equipment()
+                
+                # Исключаем уже добавленное оборудование
+                added_equipment_ids = [eq['equipment_id'] for eq in task_data.get(user_id, {}).get('equipment_products', [])]
+                available_equipment = [eq for eq in equipment_list if eq.id not in added_equipment_ids]
+                
+                keyboard = []
+                for eq in available_equipment:
+                    keyboard.append([InlineKeyboardButton(eq.name, callback_data=f"eq_{eq.id}")])
+                keyboard.append([InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")])
+                keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+                
+                workshop_name = workshop.name if workshop else "Участок"
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(
+                    f"✅ Участок: {workshop_name}\n\n"
+                    "Выберите оборудование (можно выбрать несколько):",
                     reply_markup=reply_markup
                 )
             return SELECTING_EQUIPMENT
         elif previous_state == SELECTING_PRODUCT:
-            # Возвращаемся к выбору продукции
+            # Возвращаемся к выбору продукции для текущего оборудования
             user_id = update.effective_user.id
-            equipment_id = task_data.get(user_id, {}).get('equipment_id')
+            current_equipment_id = task_data.get(user_id, {}).get('current_equipment_id')
+            if not current_equipment_id:
+                # Если нет текущего оборудования, возвращаемся к выбору оборудования
+                return await handle_error_choice(update, context)
+            
             with DatabaseManager() as db:
+                equipment = db.get_equipment_by_id(current_equipment_id)
+                equipment_name = equipment.name if equipment else f"Оборудование ID: {current_equipment_id}"
+                
                 products = db.get_all_products()
-                # Фильтруем продукцию, доступную для выбранного оборудования
+                # Фильтруем продукцию, доступную для текущего оборудования
                 available_products = []
                 for product in products:
                     equipment_for_product = db.get_equipment_for_product(product.id)
-                    if any(eq.id == equipment_id for eq in equipment_for_product) or product.default_equipment_id == equipment_id:
-                        # Исключаем уже добавленные продукты
-                        added_product_ids = [p['product_id'] for p in task_data.get(user_id, {}).get('products', [])]
-                        if product.id not in added_product_ids:
+                    if any(eq.id == current_equipment_id for eq in equipment_for_product) or product.default_equipment_id == current_equipment_id:
+                        # Исключаем уже добавленные продукты для этого оборудования
+                        equipment_entry = None
+                        for eq_entry in task_data.get(user_id, {}).get('equipment_products', []):
+                            if eq_entry['equipment_id'] == current_equipment_id:
+                                equipment_entry = eq_entry
+                                break
+                        
+                        if equipment_entry:
+                            added_product_ids = [p['product_id'] for p in equipment_entry['products']]
+                            if product.id not in added_product_ids:
+                                available_products.append(product)
+                        else:
                             available_products.append(product)
                 
                 keyboard = []
                 for product in available_products:
                     keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
-                if task_data.get(user_id, {}).get('products'):
-                    keyboard.append([InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")])
+                keyboard.append([InlineKeyboardButton("◀️ Назад к выбору оборудования", callback_data="back_to_equipment")])
                 keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
                 
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text(
+                    f"✅ Оборудование: {equipment_name}\n\n"
                     "Выберите продукцию:",
                     reply_markup=reply_markup
                 )
             return SELECTING_PRODUCT
         elif previous_state == ENTERING_QUANTITY:
-            # Возвращаемся к вводу количества (но это не должно происходить, так как после количества идет выбор добавить еще)
+            # Возвращаемся к вводу количества
             await query.edit_message_text("Введите количество продукции (число):")
             return ENTERING_QUANTITY
         elif previous_state == ADDING_MORE_PRODUCTS:
-            # Возвращаемся к выбору: добавить еще или продолжить
+            # Возвращаемся к выбору: добавить еще продукцию или вернуться к оборудованию
             user_id = update.effective_user.id
-            products_list = task_data.get(user_id, {}).get('products', [])
-            products_text = "📋 Добавленные продукты:\n\n"
-            for idx, prod in enumerate(products_list, 1):
+            current_equipment_id = task_data.get(user_id, {}).get('current_equipment_id')
+            
+            if not current_equipment_id:
+                return await handle_error_choice(update, context)
+            
+            # Находим запись оборудования
+            equipment_entry = None
+            for eq_entry in task_data.get(user_id, {}).get('equipment_products', []):
+                if eq_entry['equipment_id'] == current_equipment_id:
+                    equipment_entry = eq_entry
+                    break
+            
+            if not equipment_entry:
+                return await handle_error_choice(update, context)
+            
+            products_text = f"📋 Оборудование: {equipment_entry['equipment_name']}\n"
+            products_text += "Добавленные продукты:\n\n"
+            for idx, prod in enumerate(equipment_entry['products'], 1):
                 products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
             
             keyboard = [
                 [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
-                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("◀️ Вернуться к выбору оборудования", callback_data="back_to_equipment")],
+                [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
                 [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -239,21 +292,30 @@ async def handle_error_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return ADDING_MORE_PRODUCTS
         elif previous_state == SELECTING_EMPLOYEE:
-            # Возвращаемся к выбору: добавить еще или продолжить
+            # Возвращаемся к выбору: завершить выбор оборудования
             user_id = update.effective_user.id
-            products_list = task_data.get(user_id, {}).get('products', [])
-            products_text = "📋 Добавленные продукты:\n\n"
-            for idx, prod in enumerate(products_list, 1):
-                products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+            equipment_products = task_data.get(user_id, {}).get('equipment_products', [])
+            
+            if not equipment_products:
+                # Если нет оборудования, возвращаемся к выбору оборудования
+                return await handle_error_choice(update, context)
+            
+            # Показываем список выбранного оборудования и продуктов
+            message = "📋 Выбранное оборудование и продукция:\n\n"
+            for eq_entry in equipment_products:
+                message += f"🔧 {eq_entry['equipment_name']}:\n"
+                for prod in eq_entry['products']:
+                    message += f"  • {prod['product_name']} - {prod['quantity']} шт\n"
+                message += "\n"
             
             keyboard = [
-                [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
-                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("◀️ Вернуться к выбору оборудования", callback_data="back_to_equipment")],
+                [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
                 [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                f"{products_text}\n"
+                f"{message}\n"
                 "Выберите действие:",
                 reply_markup=reply_markup
             )
@@ -282,7 +344,7 @@ async def create_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начало создания задания (только для начальника) - выбор даты"""
     global task_data
     task_data[update.effective_user.id] = {
-        'products': []  # Список продуктов: [{'product_id': int, 'quantity': float, 'product_name': str}]
+        'equipment_products': []  # Список: [{'equipment_id': int, 'equipment_name': str, 'products': [{'product_id': int, 'quantity': float, 'product_name': str}]}]
     }
     
     # Запрашиваем дату задания с кнопками быстрого выбора
@@ -458,7 +520,7 @@ async def select_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
     shift = int(query.data.split("_")[1])
     task_data[update.effective_user.id]['shift'] = ShiftEnum(shift)
     
-    # Теперь выбираем оборудование
+    # Теперь выбираем участок
     with DatabaseManager() as db:
         workshops = db.get_all_workshops()
         if not workshops:
@@ -469,38 +531,23 @@ async def select_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context
             )
         
-        # Получаем оборудование
-        equipment_list = db.get_all_equipment()
-        if not equipment_list:
-            return await show_error_choice(
-                query,
-                "❌ В системе нет оборудования. Обратитесь к администратору.",
-                SELECTING_SHIFT,
-                context
-            )
-        
-        # Создаем клавиатуру с оборудованием
         keyboard = []
-        for eq in equipment_list:
-            workshop_name = eq.workshop.name if eq.workshop else "Без участка"
-            keyboard.append([InlineKeyboardButton(
-                f"{eq.name} ({workshop_name})",
-                callback_data=f"eq_{eq.id}"
-            )])
+        for workshop in workshops:
+            keyboard.append([InlineKeyboardButton(workshop.name, callback_data=f"ws_{workshop.id}")])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         shift_name = "1-я смена (8:00-20:00)" if shift == 1 else "2-я смена (20:00-8:00)"
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
             f"✅ Смена: {shift_name}\n\n"
-            "Выберите оборудование:",
+            "Выберите участок:",
             reply_markup=reply_markup
         )
-        return SELECTING_EQUIPMENT
+        return SELECTING_WORKSHOP
 
 
-async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора оборудования"""
+async def select_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора участка"""
     query = update.callback_query
     await query.answer()
     
@@ -509,10 +556,99 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data.pop(update.effective_user.id, None)
         return ConversationHandler.END
     
+    workshop_id = int(query.data.split("_")[1])
+    task_data[update.effective_user.id]['workshop_id'] = workshop_id
+    
+    # Получаем оборудование выбранного участка
+    with DatabaseManager() as db:
+        workshop = db.get_workshop_by_id(workshop_id)
+        equipment_list = db.get_all_equipment(workshop_id=workshop_id)
+        
+        if not equipment_list:
+            return await show_error_choice(
+                query,
+                f"❌ На участке '{workshop.name}' нет оборудования. Обратитесь к администратору.",
+                SELECTING_WORKSHOP,
+                context
+            )
+        
+        # Создаем клавиатуру с оборудованием
+        keyboard = []
+        for eq in equipment_list:
+            keyboard.append([InlineKeyboardButton(eq.name, callback_data=f"eq_{eq.id}")])
+        keyboard.append([InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
+        workshop_name = workshop.name if workshop else "Участок"
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"✅ Участок: {workshop_name}\n\n"
+            "Выберите оборудование (можно выбрать несколько):",
+            reply_markup=reply_markup
+        )
+        return SELECTING_EQUIPMENT
+
+
+async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора оборудования (можно выбрать несколько)"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel":
+        await query.edit_message_text("❌ Создание задания отменено.")
+        task_data.pop(update.effective_user.id, None)
+        return ConversationHandler.END
+    
+    user_id = update.effective_user.id
+    equipment_products = task_data[user_id].get('equipment_products', [])
+    
+    # Проверяем, не завершен ли выбор оборудования
+    if query.data == "finish_equipment":
+        if not equipment_products:
+            await query.answer("❌ Выберите хотя бы одно оборудование!", show_alert=True)
+            return SELECTING_EQUIPMENT
+        
+        # Переходим к выбору сотрудника
+        with DatabaseManager() as db:
+            employees = db.get_all_employees()
+            if not employees:
+                return await show_error_choice(
+                    query,
+                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
+                    SELECTING_EQUIPMENT,
+                    context
+                )
+            
+            keyboard = []
+            for emp in employees:
+                keyboard.append([InlineKeyboardButton(
+                    emp.full_name or f"ID: {emp.telegram_id}",
+                    callback_data=f"emp_{emp.id}"
+                )])
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "Выберите ответственного сотрудника:",
+                reply_markup=reply_markup
+            )
+            return SELECTING_EMPLOYEE
+    
+    # Выбрано конкретное оборудование
     equipment_id = int(query.data.split("_")[1])
-    task_data[update.effective_user.id]['equipment_id'] = equipment_id
+    
+    # Проверяем, не добавлено ли уже это оборудование
+    if any(eq['equipment_id'] == equipment_id for eq in equipment_products):
+        await query.answer("⚠️ Это оборудование уже добавлено!", show_alert=True)
+        return SELECTING_EQUIPMENT
+    
+    # Сохраняем текущее оборудование для выбора продукции
+    task_data[user_id]['current_equipment_id'] = equipment_id
     
     with DatabaseManager() as db:
+        equipment = db.get_equipment_by_id(equipment_id)
+        equipment_name = equipment.name if equipment else f"Оборудование ID: {equipment_id}"
+        
         products = db.get_all_products()
         if not products:
             return await show_error_choice(
@@ -532,7 +668,7 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not available_products:
             return await show_error_choice(
                 query,
-                "❌ Для выбранного оборудования нет доступной продукции.",
+                f"❌ Для оборудования '{equipment_name}' нет доступной продукции.",
                 SELECTING_EQUIPMENT,
                 context
             )
@@ -540,10 +676,12 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         for product in available_products:
             keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад к выбору оборудования", callback_data="back_to_equipment")])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
+            f"✅ Оборудование: {equipment_name}\n\n"
             "Выберите продукцию:",
             reply_markup=reply_markup
         )
@@ -551,7 +689,7 @@ async def select_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора продукции"""
+    """Обработка выбора продукции для текущего оборудования"""
     query = update.callback_query
     await query.answer()
     
@@ -560,33 +698,50 @@ async def select_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_data.pop(update.effective_user.id, None)
         return ConversationHandler.END
     
-    # Проверяем, не является ли это кнопкой "Продолжить"
-    if query.data == "continue_to_employee":
-        # Переходим к выбору сотрудника
+    if query.data == "back_to_equipment":
+        # Возвращаемся к выбору оборудования
+        user_id = update.effective_user.id
+        workshop_id = task_data[user_id].get('workshop_id')
+        task_data[user_id].pop('current_equipment_id', None)
+        
         with DatabaseManager() as db:
-            employees = db.get_all_employees()
-            if not employees:
-                return await show_error_choice(
-                    query,
-                    "❌ В системе нет сотрудников. Обратитесь к администратору.",
-                    SELECTING_PRODUCT,
-                    context
+            workshop = db.get_workshop_by_id(workshop_id) if workshop_id else None
+            equipment_list = db.get_all_equipment(workshop_id=workshop_id) if workshop_id else db.get_all_equipment()
+            
+            # Исключаем уже добавленное оборудование
+            added_equipment_ids = [eq['equipment_id'] for eq in task_data[user_id].get('equipment_products', [])]
+            available_equipment = [eq for eq in equipment_list if eq.id not in added_equipment_ids]
+            
+            if not available_equipment:
+                # Если все оборудование выбрано, предлагаем завершить
+                keyboard = [
+                    [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                workshop_name = workshop.name if workshop else "Участок"
+                await query.edit_message_text(
+                    f"✅ Участок: {workshop_name}\n\n"
+                    "Все доступное оборудование уже выбрано.\n"
+                    "Завершите выбор оборудования:",
+                    reply_markup=reply_markup
                 )
+                return SELECTING_EQUIPMENT
             
             keyboard = []
-            for emp in employees:
-                keyboard.append([InlineKeyboardButton(
-                    emp.full_name or f"ID: {emp.telegram_id}",
-                    callback_data=f"emp_{emp.id}"
-                )])
+            for eq in available_equipment:
+                keyboard.append([InlineKeyboardButton(eq.name, callback_data=f"eq_{eq.id}")])
+            keyboard.append([InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")])
             keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             
+            workshop_name = workshop.name if workshop else "Участок"
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                "Выберите ответственного сотрудника:",
+                f"✅ Участок: {workshop_name}\n\n"
+                "Выберите оборудование (можно выбрать несколько):",
                 reply_markup=reply_markup
             )
-            return SELECTING_EMPLOYEE
+            return SELECTING_EQUIPMENT
     
     product_id = int(query.data.split("_")[1])
     # Сохраняем product_id временно для ввода количества
@@ -614,11 +769,12 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return HANDLING_ERROR
         
-        # Получаем информацию о выбранном продукте
+        # Получаем информацию о выбранном продукте и оборудовании
         user_id = update.effective_user.id
         product_id = task_data[user_id].get('product_id')
+        current_equipment_id = task_data[user_id].get('current_equipment_id')
         
-        if not product_id:
+        if not product_id or not current_equipment_id:
             keyboard = [
                 [InlineKeyboardButton("◀️ Вернуться назад", callback_data="error_back")],
                 [InlineKeyboardButton("❌ Отменить создание", callback_data="error_cancel")]
@@ -626,7 +782,7 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             context.user_data['error_previous_state'] = ENTERING_QUANTITY
             await update.message.reply_text(
-                "❌ Ошибка: продукция не выбрана. Попробуйте еще раз.\n\n"
+                "❌ Ошибка: продукция или оборудование не выбраны. Попробуйте еще раз.\n\n"
                 "Выберите действие:",
                 reply_markup=reply_markup
             )
@@ -636,29 +792,50 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             product = db.get_product_by_id(product_id)
             product_name = product.name if product else f"Продукт ID: {product_id}"
             
-            # Добавляем продукт в список
-            if 'products' not in task_data[user_id]:
-                task_data[user_id]['products'] = []
+            equipment = db.get_equipment_by_id(current_equipment_id)
+            equipment_name = equipment.name if equipment else f"Оборудование ID: {current_equipment_id}"
             
-            task_data[user_id]['products'].append({
+            # Инициализируем equipment_products если нужно
+            if 'equipment_products' not in task_data[user_id]:
+                task_data[user_id]['equipment_products'] = []
+            
+            # Ищем оборудование в списке или создаем новую запись
+            equipment_entry = None
+            for eq_entry in task_data[user_id]['equipment_products']:
+                if eq_entry['equipment_id'] == current_equipment_id:
+                    equipment_entry = eq_entry
+                    break
+            
+            if not equipment_entry:
+                # Создаем новую запись для оборудования
+                equipment_entry = {
+                    'equipment_id': current_equipment_id,
+                    'equipment_name': equipment_name,
+                    'products': []
+                }
+                task_data[user_id]['equipment_products'].append(equipment_entry)
+            
+            # Добавляем продукт в список продуктов этого оборудования
+            equipment_entry['products'].append({
                 'product_id': product_id,
                 'quantity': quantity,
                 'product_name': product_name
             })
             
-            # Удаляем временный product_id
+            # Удаляем временные данные
             task_data[user_id].pop('product_id', None)
             
-            # Формируем список добавленных продуктов
-            products_list = task_data[user_id]['products']
-            products_text = "📋 Добавленные продукты:\n\n"
-            for idx, prod in enumerate(products_list, 1):
+            # Формируем список добавленных продуктов для текущего оборудования
+            products_text = f"📋 Оборудование: {equipment_name}\n"
+            products_text += "Добавленные продукты:\n\n"
+            for idx, prod in enumerate(equipment_entry['products'], 1):
                 products_text += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
             
-            # Предлагаем добавить еще продукцию или продолжить
+            # Предлагаем добавить еще продукцию для этого оборудования или вернуться к выбору оборудования
             keyboard = [
                 [InlineKeyboardButton("➕ Добавить еще продукцию", callback_data="add_more_product")],
-                [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                [InlineKeyboardButton("◀️ Вернуться к выбору оборудования", callback_data="back_to_equipment")],
+                [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
                 [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -685,7 +862,7 @@ async def enter_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_add_more_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора: добавить еще продукцию или продолжить"""
+    """Обработка выбора: добавить еще продукцию, вернуться к оборудованию или завершить"""
     query = update.callback_query
     await query.answer()
     
@@ -695,31 +872,48 @@ async def handle_add_more_products(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
     
     user_id = update.effective_user.id
-    equipment_id = task_data[user_id].get('equipment_id')
+    current_equipment_id = task_data[user_id].get('current_equipment_id')
     
     if query.data == "add_more_product":
-        # Возвращаемся к выбору продукции
+        # Возвращаемся к выбору продукции для текущего оборудования
+        if not current_equipment_id:
+            await query.answer("❌ Ошибка: оборудование не выбрано!", show_alert=True)
+            return ADDING_MORE_PRODUCTS
+        
         with DatabaseManager() as db:
+            equipment = db.get_equipment_by_id(current_equipment_id)
+            equipment_name = equipment.name if equipment else f"Оборудование ID: {current_equipment_id}"
+            
             products = db.get_all_products()
-            # Фильтруем продукцию, доступную для выбранного оборудования
+            # Фильтруем продукцию, доступную для текущего оборудования
             available_products = []
             for product in products:
                 equipment_for_product = db.get_equipment_for_product(product.id)
-                if any(eq.id == equipment_id for eq in equipment_for_product) or product.default_equipment_id == equipment_id:
-                    # Исключаем уже добавленные продукты
-                    added_product_ids = [p['product_id'] for p in task_data[user_id].get('products', [])]
-                    if product.id not in added_product_ids:
+                if any(eq.id == current_equipment_id for eq in equipment_for_product) or product.default_equipment_id == current_equipment_id:
+                    # Исключаем уже добавленные продукты для этого оборудования
+                    equipment_entry = None
+                    for eq_entry in task_data[user_id].get('equipment_products', []):
+                        if eq_entry['equipment_id'] == current_equipment_id:
+                            equipment_entry = eq_entry
+                            break
+                    
+                    if equipment_entry:
+                        added_product_ids = [p['product_id'] for p in equipment_entry['products']]
+                        if product.id not in added_product_ids:
+                            available_products.append(product)
+                    else:
                         available_products.append(product)
             
             if not available_products:
-                # Если нет доступных продуктов, предлагаем продолжить
+                # Если нет доступных продуктов, предлагаем вернуться к выбору оборудования
                 keyboard = [
-                    [InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")],
+                    [InlineKeyboardButton("◀️ Вернуться к выбору оборудования", callback_data="back_to_equipment")],
+                    [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
                     [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await query.edit_message_text(
-                    "❌ Нет доступной продукции для добавления.\n\n"
+                    f"❌ Для оборудования '{equipment_name}' нет доступной продукции для добавления.\n\n"
                     "Выберите действие:",
                     reply_markup=reply_markup
                 )
@@ -728,18 +922,80 @@ async def handle_add_more_products(update: Update, context: ContextTypes.DEFAULT
             keyboard = []
             for product in available_products:
                 keyboard.append([InlineKeyboardButton(product.name, callback_data=f"prod_{product.id}")])
-            keyboard.append([InlineKeyboardButton("✅ Продолжить (выбрать сотрудника)", callback_data="continue_to_employee")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад к выбору оборудования", callback_data="back_to_equipment")])
+            keyboard.append([InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")])
             keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
+                f"✅ Оборудование: {equipment_name}\n\n"
                 "Выберите продукцию для добавления:",
                 reply_markup=reply_markup
             )
             return SELECTING_PRODUCT
     
-    elif query.data == "continue_to_employee":
+    elif query.data == "back_to_equipment":
+        # Возвращаемся к выбору оборудования
+        user_id = update.effective_user.id
+        workshop_id = task_data[user_id].get('workshop_id')
+        task_data[user_id].pop('current_equipment_id', None)
+        
+        with DatabaseManager() as db:
+            workshop = db.get_workshop_by_id(workshop_id) if workshop_id else None
+            equipment_list = db.get_all_equipment(workshop_id=workshop_id) if workshop_id else db.get_all_equipment()
+            
+            # Исключаем уже добавленное оборудование
+            added_equipment_ids = [eq['equipment_id'] for eq in task_data[user_id].get('equipment_products', [])]
+            available_equipment = [eq for eq in equipment_list if eq.id not in added_equipment_ids]
+            
+            if not available_equipment:
+                # Если все оборудование выбрано, предлагаем завершить
+                keyboard = [
+                    [InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                workshop_name = workshop.name if workshop else "Участок"
+                await query.edit_message_text(
+                    f"✅ Участок: {workshop_name}\n\n"
+                    "Все доступное оборудование уже выбрано.\n"
+                    "Завершите выбор оборудования:",
+                    reply_markup=reply_markup
+                )
+                return SELECTING_EQUIPMENT
+            
+            keyboard = []
+            for eq in available_equipment:
+                keyboard.append([InlineKeyboardButton(eq.name, callback_data=f"eq_{eq.id}")])
+            keyboard.append([InlineKeyboardButton("✅ Завершить выбор оборудования", callback_data="finish_equipment")])
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+            
+            workshop_name = workshop.name if workshop else "Участок"
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                f"✅ Участок: {workshop_name}\n\n"
+                "Выберите оборудование (можно выбрать несколько):",
+                reply_markup=reply_markup
+            )
+            return SELECTING_EQUIPMENT
+    
+    elif query.data == "finish_equipment":
         # Переходим к выбору сотрудника
+        user_id = update.effective_user.id
+        equipment_products = task_data[user_id].get('equipment_products', [])
+        
+        if not equipment_products:
+            await query.answer("❌ Выберите хотя бы одно оборудование с продукцией!", show_alert=True)
+            return ADDING_MORE_PRODUCTS
+        
+        # Проверяем, что у всех оборудований есть хотя бы один продукт
+        for eq_entry in equipment_products:
+            if not eq_entry.get('products'):
+                await query.answer("❌ Для каждого оборудования должна быть выбрана хотя бы одна продукция!", show_alert=True)
+                return ADDING_MORE_PRODUCTS
+        
+        task_data[user_id].pop('current_equipment_id', None)
+        
         with DatabaseManager() as db:
             employees = db.get_all_employees()
             if not employees:
@@ -779,24 +1035,31 @@ async def select_employee(update: Update, context: ContextTypes.DEFAULT_TYPE):
     employee_id = int(query.data.split("_")[1])
     task_data[update.effective_user.id]['employee_id'] = employee_id
     
-    # Формируем подтверждение со списком всех продуктов
+    # Формируем подтверждение со списком всех оборудований и продуктов
     with DatabaseManager() as db:
-        equipment = db.get_equipment_by_id(task_data[update.effective_user.id]['equipment_id'])
+        workshop = db.get_workshop_by_id(task_data[update.effective_user.id].get('workshop_id'))
         employee = db.db.query(User).filter(User.id == employee_id).first()
         
         shift = task_data[update.effective_user.id]['shift']
         shift_name = "1-я смена (8:00-20:00)" if shift.value == 1 else "2-я смена (20:00-8:00)"
         task_date = task_data[update.effective_user.id]['task_date']
-        products_list = task_data[update.effective_user.id].get('products', [])
+        equipment_products = task_data[update.effective_user.id].get('equipment_products', [])
         
         message = f"📋 Подтвердите создание задания:\n\n"
         message += f"Дата: {task_date.strftime('%d.%m.%Y')}\n"
         message += f"Смена: {shift_name}\n"
-        message += f"Оборудование: {equipment.name}\n"
+        message += f"Участок: {workshop.name if workshop else 'Не указан'}\n"
         message += f"Сотрудник: {employee.full_name or f'ID: {employee.telegram_id}'}\n\n"
-        message += f"Продукция ({len(products_list)} позиций):\n"
-        for idx, prod in enumerate(products_list, 1):
-            message += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+        
+        total_products = 0
+        for eq_entry in equipment_products:
+            message += f"🔧 {eq_entry['equipment_name']}:\n"
+            for prod in eq_entry['products']:
+                message += f"  • {prod['product_name']} - {prod['quantity']} шт\n"
+                total_products += 1
+            message += "\n"
+        
+        message += f"Всего позиций: {total_products}"
         
         keyboard = [
             [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_task")],
@@ -821,7 +1084,7 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = task_data.get(user_id, {})
     
     # Проверяем наличие всех необходимых данных
-    if not all(k in data for k in ['equipment_id', 'employee_id', 'shift', 'task_date']):
+    if not all(k in data for k in ['workshop_id', 'employee_id', 'shift', 'task_date']):
         return await show_error_choice(
             query,
             "❌ Ошибка: не все данные заполнены. Возможно, процесс создания был прерван.",
@@ -829,50 +1092,63 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context
         )
     
-    products_list = data.get('products', [])
-    if not products_list:
+    equipment_products = data.get('equipment_products', [])
+    if not equipment_products:
         return await show_error_choice(
             query,
-            "❌ Ошибка: не добавлено ни одной продукции. Добавьте хотя бы одну продукцию.",
+            "❌ Ошибка: не добавлено ни одного оборудования. Добавьте хотя бы одно оборудование.",
             CONFIRMING_TASK,
             context
         )
     
+    # Проверяем, что у всех оборудований есть продукты
+    for eq_entry in equipment_products:
+        if not eq_entry.get('products'):
+            return await show_error_choice(
+                query,
+                f"❌ Ошибка: для оборудования '{eq_entry.get('equipment_name', 'Неизвестно')}' не добавлено ни одной продукции.",
+                CONFIRMING_TASK,
+                context
+            )
+    
     with DatabaseManager() as db:
         manager = db.get_user_by_telegram_id(user_id)
         employee = db.db.query(User).filter(User.id == data['employee_id']).first()
-        equipment = db.get_equipment_by_id(data['equipment_id'])
+        workshop = db.get_workshop_by_id(data['workshop_id'])
         shift_name = "1-я смена (8:00-20:00)" if data['shift'].value == 1 else "2-я смена (20:00-8:00)"
         task_date_dt = datetime.combine(data['task_date'], datetime.min.time())
         
-        # Создаем задания для каждой продукции
+        # Создаем задания для каждого оборудования и каждой продукции
         created_tasks = []
-        for prod in products_list:
-            task = db.create_task(
-                manager_id=manager.id,
-                employee_id=data['employee_id'],
-                equipment_id=data['equipment_id'],
-                product_id=prod['product_id'],
-                planned_quantity=prod['quantity'],
-                shift=data['shift'],
-                task_date=task_date_dt,
-                notes=None
-            )
-            created_tasks.append(task)
-            logger.info(f"Создано задание {task.id} менеджером {manager.telegram_id}")
+        for eq_entry in equipment_products:
+            for prod in eq_entry['products']:
+                task = db.create_task(
+                    manager_id=manager.id,
+                    employee_id=data['employee_id'],
+                    equipment_id=eq_entry['equipment_id'],
+                    product_id=prod['product_id'],
+                    planned_quantity=prod['quantity'],
+                    shift=data['shift'],
+                    task_date=task_date_dt,
+                    notes=None
+                )
+                created_tasks.append(task)
+                logger.info(f"Создано задание {task.id} менеджером {manager.telegram_id}")
         
         # Формируем общее уведомление для сотрудника
         if employee:
             notification_msg = f"📋 Вам назначено задание ({len(created_tasks)} позиций)\n\n"
             notification_msg += f"Дата: {data['task_date'].strftime('%d.%m.%Y')}\n"
             notification_msg += f"Смена: {shift_name}\n"
-            notification_msg += f"Оборудование: {equipment.name}\n\n"
-            notification_msg += "Продукция:\n"
-            for idx, prod in enumerate(products_list, 1):
-                notification_msg += f"{idx}. {prod['product_name']} - {prod['quantity']} шт\n"
+            notification_msg += f"Участок: {workshop.name if workshop else 'Не указан'}\n\n"
+            
+            for eq_entry in equipment_products:
+                notification_msg += f"🔧 {eq_entry['equipment_name']}:\n"
+                for prod in eq_entry['products']:
+                    notification_msg += f"  • {prod['product_name']} - {prod['quantity']} шт\n"
+                notification_msg += "\n"
             
             # Создаем уведомление для каждого задания
-            task_ids = [str(t.id) for t in created_tasks]
             for task in created_tasks:
                 db.create_notification(employee.id, task.id, notification_msg)
             
@@ -1696,10 +1972,11 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, select_task_date)
             ],
             SELECTING_SHIFT: [CallbackQueryHandler(select_shift)],
-            SELECTING_EQUIPMENT: [CallbackQueryHandler(select_equipment)],
-            SELECTING_PRODUCT: [CallbackQueryHandler(select_product)],
+            SELECTING_WORKSHOP: [CallbackQueryHandler(select_workshop, pattern="^(ws_|cancel)")],
+            SELECTING_EQUIPMENT: [CallbackQueryHandler(select_equipment, pattern="^(eq_|finish_equipment|cancel)")],
+            SELECTING_PRODUCT: [CallbackQueryHandler(select_product, pattern="^(prod_|back_to_equipment|cancel)")],
             ENTERING_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_quantity)],
-            ADDING_MORE_PRODUCTS: [CallbackQueryHandler(handle_add_more_products, pattern="^(add_more_product|continue_to_employee|cancel)")],
+            ADDING_MORE_PRODUCTS: [CallbackQueryHandler(handle_add_more_products, pattern="^(add_more_product|back_to_equipment|finish_equipment|cancel)")],
             SELECTING_EMPLOYEE: [CallbackQueryHandler(select_employee)],
             CONFIRMING_TASK: [CallbackQueryHandler(confirm_task)],
             HANDLING_ERROR: [CallbackQueryHandler(handle_error_choice, pattern="^error_")],
